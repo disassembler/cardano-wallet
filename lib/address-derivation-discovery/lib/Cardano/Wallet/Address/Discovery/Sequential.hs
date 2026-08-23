@@ -53,6 +53,7 @@ module Cardano.Wallet.Address.Discovery.Sequential
 
       -- ** State
     , SeqState (..)
+    , SeqStates (..)
     , DerivationPrefix (..)
     , purposeBIP44
     , purposeCIP1852
@@ -61,6 +62,7 @@ module Cardano.Wallet.Address.Discovery.Sequential
     -- , discoverSeq
     -- , discoverSeqWithRewards
     , isOwned
+    , isOwnedInSeqStates
     ) where
 
 import Cardano.Address.Derivation
@@ -567,19 +569,32 @@ instance
         ArgGenChange (SeqState n k) =
             (k 'CredFromKeyK XPub -> k 'CredFromKeyK XPub -> Address)
 
-    genChange mkAddress st = (addr, st{pendingChangeIxs = pending'})
-      where
-        ixMin = minBound @(Index 'Soft 'CredFromKeyK)
-        updatePending pendingIxs =
-            pendingIxsFromList $ L.nub $ (pendingIxsToList pendingIxs) <> [ixMin]
-        (ix, pending') =
-            case changeAddressMode st of
-                SingleChangeAddress ->
-                    (ixMin, updatePending (pendingChangeIxs st))
-                IncreasingChangeAddresses ->
-                    nextChangeIndex (getPool $ internalPool st) (pendingChangeIxs st)
-        addressXPub = deriveAddressPublicKey (accountXPub st) UtxoInternal ix
-        addr = mkAddress addressXPub (rewardAccountKey st)
+    genChange mkAddress st = case changeAddressMode st of
+        SingleExternalAddress ->
+            let ixMin = minBound @(Index 'Soft 'CredFromKeyK)
+                addrXPub =
+                    deriveAddressPublicKey (accountXPub st) UtxoExternal ixMin
+                addr = mkAddress addrXPub (rewardAccountKey st)
+            in  (addr, st)
+        _ ->
+            let ixMin = minBound @(Index 'Soft 'CredFromKeyK)
+                updatePending pendingIxs =
+                    pendingIxsFromList
+                        $ L.nub
+                        $ (pendingIxsToList pendingIxs) <> [ixMin]
+                (ix, pending') =
+                    case changeAddressMode st of
+                        SingleChangeAddress ->
+                            (ixMin, updatePending (pendingChangeIxs st))
+                        IncreasingChangeAddresses ->
+                            nextChangeIndex
+                                (getPool $ internalPool st)
+                                (pendingChangeIxs st)
+                        SingleExternalAddress -> error "unreachable"
+                addrXPub =
+                    deriveAddressPublicKey (accountXPub st) UtxoInternal ix
+                addr = mkAddress addrXPub (rewardAccountKey st)
+            in  (addr, st{pendingChangeIxs = pending'})
 
 isOwned
     :: forall n k
@@ -666,3 +681,115 @@ instance
 
 instance GetAccount (SeqState n k) k where
     getAccount = accountXPub
+
+{-------------------------------------------------------------------------------
+    SeqStates — multi-account wrapper
+-------------------------------------------------------------------------------}
+
+-- | A multi-account address discovery state: a map from hardened account
+-- indices to per-account 'SeqState' values.  Each account has fully
+-- independent address pools, UTxO, and pending-change tracking.
+--
+-- The management of accounts inside a single wallet is left out of 'SeqState'
+-- by design; 'SeqStates' is the correct extension point.
+newtype SeqStates (n :: NetworkDiscriminant) k
+    = SeqStates
+    { getSeqStates :: Map.Map (Index 'Hardened 'AccountK) (SeqState n k)
+    }
+    deriving stock (Generic)
+
+instance
+    ( NFData (k 'AccountK XPub)
+    , NFData (k 'CredFromKeyK XPub)
+    , NFData (k 'PolicyK XPub)
+    , NFData (KeyFingerprint "payment" k)
+    )
+    => NFData (SeqStates n k)
+
+-- | Dispatches to each member 'SeqState' in turn until the address is
+-- recognised.  The state of the owning account is updated; all other
+-- accounts are left unchanged.
+instance SupportsDiscovery n k => IsOurs (SeqStates n k) Address where
+    isOurs addr (SeqStates states) =
+        let (found, states') = Map.mapAccum step Nothing states
+        in  (found, SeqStates states')
+      where
+        step (Just path) st = (Just path, st)
+        step Nothing st =
+            let (mPath, st') = isOurs addr st
+            in  (mPath, st')
+
+-- | Like 'isOwned', but iterates over all accounts in a 'SeqStates'.  The
+-- correct account private key is derived by reading the account index
+-- embedded in each 'SeqState'\'s 'derivationPrefix'.
+isOwnedInSeqStates
+    :: forall n k
+     . ( MkKeyFingerprint k Address
+       , HardDerivation k
+       , AddressCredential k ~ 'CredFromKeyK
+       , AddressIndexDerivationType k ~ 'Soft
+       )
+    => SeqStates n k
+    -> (k 'RootK XPrv, Passphrase "encryption")
+    -> Address
+    -> Maybe (k 'CredFromKeyK XPrv, Passphrase "encryption")
+isOwnedInSeqStates (SeqStates states) creds addrRaw =
+    Map.foldlWithKey' tryAccount Nothing states
+  where
+    tryAccount (Just result) _ _ = Just result
+    tryAccount Nothing accountIx st = isOwnedAt st accountIx creds addrRaw
+
+-- | Derive the private key for an address in a specific account.  Uses the
+-- supplied account index rather than the 'minBound' assumption in 'isOwned'.
+isOwnedAt
+    :: forall n k
+     . ( MkKeyFingerprint k Address
+       , HardDerivation k
+       , AddressCredential k ~ 'CredFromKeyK
+       , AddressIndexDerivationType k ~ 'Soft
+       )
+    => SeqState n k
+    -> Index 'Hardened 'AccountK
+    -> (k 'RootK XPrv, Passphrase "encryption")
+    -> Address
+    -> Maybe (k 'CredFromKeyK XPrv, Passphrase "encryption")
+isOwnedAt st accountIx (rootPrv, pwd) addrRaw =
+    case paymentKeyFingerprint addrRaw of
+        Left _ -> Nothing
+        Right addr ->
+            let xPrv1 = lookupAndDeriveXPrv addr (internalPool st)
+                xPrv2 = lookupAndDeriveXPrv addr (externalPool st)
+            in  (,pwd) <$> (xPrv1 <|> xPrv2)
+  where
+    accountPrv = deriveAccountPrivateKey pwd rootPrv accountIx
+    lookupAndDeriveXPrv
+        :: forall c
+         . Typeable c
+        => KeyFingerprint "payment" k
+        -> SeqAddressPool c k
+        -> Maybe (k 'CredFromKeyK XPrv)
+    lookupAndDeriveXPrv addr (SeqAddressPool pool) =
+        deriveAddressPrivateKey pwd accountPrv (roleVal @c)
+            <$> AddressPool.lookup addr pool
+
+-- | Dispatch 'genChange' to the identified account within 'SeqStates'.
+-- Callers must supply the target account index as part of 'ArgGenChange'.
+instance
+    ( SoftDerivation k
+    , AddressCredential k ~ 'CredFromKeyK
+    )
+    => GenChange (SeqStates n k)
+    where
+    type ArgGenChange (SeqStates n k) =
+        (Index 'Hardened 'AccountK, ArgGenChange (SeqState n k))
+
+    genChange (accountIx, mkAddr) (SeqStates states) =
+        case Map.lookup accountIx states of
+            Nothing ->
+                error
+                    $ "genChange @SeqStates: account index "
+                        <> show (getIndex accountIx)
+                        <> " not found"
+            Just st ->
+                let (addr, st') = genChange mkAddr st
+                in  (addr, SeqStates $ Map.insert accountIx st' states)

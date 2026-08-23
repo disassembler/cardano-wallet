@@ -88,6 +88,7 @@ import Cardano.Wallet.Api
     , ShelleyMigrations
     , ShelleyTransactions
     , StakePools
+    , WalletAccounts
     , WalletKeys
     , Wallets
     )
@@ -133,8 +134,15 @@ import Cardano.Wallet.Api.Http.Shelley.Server
     , mkSharedWallet
     , mkShelleyWallet
     , patchSharedWallet
+    , deleteWalletAccountH
+    , getWalletAccount
+    , getWalletAccountUtxoStatistics
+    , listWalletAccountAddressesH
+    , listWalletAccountTransactionsH
+    , listWalletAccountsH
     , postAccountPublicKey
     , postAccountWallet
+    , postWalletAccount
     , postExternalTransaction
     , postIcarusWallet
     , postLedgerWallet
@@ -260,11 +268,15 @@ import Data.Text.Class
 import Network.Ntp
     ( NtpClient
     )
+import Control.Monad.Error.Class
+    ( throwError
+    )
 import Servant
     ( Handler (..)
     , NoContent (..)
     , Server
     , err400
+    , err501
     , (:<|>) (..)
     )
 import Servant.Server
@@ -295,6 +307,7 @@ server
 server byron icarus shelley multisig spl drepLayer ntp blockchainSource =
     wallets
         :<|> walletKeys
+        :<|> walletAccounts
         :<|> assets
         :<|> addresses
         :<|> coinSelections
@@ -318,6 +331,19 @@ server byron icarus shelley multisig spl drepLayer ntp blockchainSource =
         :<|> sharedTransactions multisig
         :<|> blocks
   where
+    walletAccounts :: Server (WalletAccounts n)
+    walletAccounts =
+        postWalletAccount shelley
+            :<|> listWalletAccountsH shelley
+            :<|> getWalletAccount shelley
+            :<|> deleteWalletAccountH shelley
+            :<|> listWalletAccountAddressesH shelley (normalizeDelegationAddress @_ @ShelleyKey @n)
+            :<|> getWalletAccountUtxoStatistics shelley
+            :<|> (\_ _ _ -> throwError err501)
+            :<|> listWalletAccountTransactionsH shelley
+            :<|> (\_ _ _ -> throwError err501)
+            :<|> (\_ _ _ -> throwError err501)
+
     wallets :: Server Wallets
     wallets =
         deleteWallet shelley

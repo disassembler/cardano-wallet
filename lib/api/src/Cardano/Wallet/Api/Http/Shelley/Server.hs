@@ -107,6 +107,13 @@ module Cardano.Wallet.Api.Http.Shelley.Server
     , decodeSharedTransaction
     , getBlocksLatestHeader
     , submitSharedTransaction
+    , postWalletAccount
+    , getWalletAccount
+    , getWalletAccountUtxoStatistics
+    , listWalletAccountAddressesH
+    , listWalletAccountTransactionsH
+    , listWalletAccountsH
+    , deleteWalletAccountH
 
       -- * Server error responses
     , IsServerError (..)
@@ -193,10 +200,13 @@ import Cardano.Read.Ledger.Tx.CBOR
 import Cardano.Wallet
     ( BuiltTx (..)
     , DelegationFee (feePercentiles)
+    , ErrAddAccount (..)
     , ErrConstructSharedWallet (..)
     , ErrConstructTx (..)
     , ErrCreateMigrationPlan (..)
     , ErrDecodeTx (..)
+    , ErrDeleteAccount (..)
+    , ErrGetAccount (..)
     , ErrGetPolicyId (..)
     , ErrMkTransaction (..)
     , ErrNoSuchWallet (..)
@@ -215,20 +225,28 @@ import Cardano.Wallet
     , Percentile (..)
     , TxSubmitLog
     , WalletWorkerLog (..)
+    , addWalletAccount
     , catchUpWallet
     , dbLayer
+    , deleteWalletAccount
     , dummyChangeAddressGen
     , genesisData
     , getCurrentEpochSlotting
+    , listAccountAddresses
+    , listAccountUtxoStatistics
+    , listWalletAccounts
+    , readAccountUTxO
     , logger
     , manageRewardBalance
     , mkWalletBroadcastOps
     , networkLayer
     , readPrivateKey
+    , readWallet
     , readWalletMeta
     , rescanWallet
     , signTransactionV2
     , txWitnessTagForKey
+    , walletSyncProgress
     )
 import Cardano.Wallet.Address.Book
     ( AddressBookIso
@@ -250,7 +268,8 @@ import Cardano.Wallet.Address.Derivation
     , stakeDerivationPath
     )
 import Cardano.Wallet.Address.Derivation.Byron
-    ( mkByronKeyFromMasterKey
+    ( ByronKey
+    , mkByronKeyFromMasterKey
     )
 import Cardano.Wallet.Address.Derivation.Icarus
     ( IcarusKey
@@ -351,8 +370,11 @@ import Cardano.Wallet.Api.Http.Server.Handlers.TxCBOR
     , parseTxCBOR
     )
 import Cardano.Wallet.Api.Types
-    ( AccountPostData (..)
+    ( AccountMode (..)
+    , AccountPostData (..)
     , AddressAmount (..)
+    , ApiAccount (..)
+    , ApiPostAccount (..)
     , AddressAmountNoAssets (..)
     , ApiAccountPublicKey (..)
     , ApiAccountSharedPublicKey (..)
@@ -752,6 +774,7 @@ import Control.Monad
     ( forM
     , forever
     , join
+    , unless
     , void
     , when
     )
@@ -1014,6 +1037,259 @@ type MkApiWallet ctx s w =
     -> SyncProgress
     -> Handler w
 
+-- | Add a new hardened account to an existing Shelley wallet.
+-- Returns 201 with a zero-balance 'ApiAccount' on success.
+postWalletAccount
+    :: forall ctx s n k
+     . ( ctx ~ ApiLayer s
+       , s ~ SeqState n k
+       , Seq.SupportsDiscovery n k
+       , Excluding '[ByronKey, SharedKey] k
+       , WalletFlavor s
+       )
+    => ctx
+    -> ApiT WalletId
+    -> ApiPostAccount
+    -> Handler ApiAccount
+postWalletAccount ctx (ApiT wid) body =
+    withWorkerCtx @_ @s ctx wid liftE liftE $ \wrk -> do
+        liftHandler $ addWalletAccount wrk accountIx pwd
+        (cp, _, _) <- handler $ readWallet wrk
+        progress <- liftIO $ walletSyncProgress @_ @_ ctx cp
+        let ti = timeInterpreter (ctx ^. networkLayer)
+        tip' <- liftIO
+            $ getWalletTip
+                (neverFails "getWalletTip for postWalletAccount" ti)
+                cp
+        pure
+            ApiAccount
+                { accountIndex = ApiT $ DerivationIndex $ getIndex accountIx
+                , balance =
+                    ApiWalletBalance
+                        { available = ApiAmount.fromCoin (Coin 0)
+                        , total = ApiAmount.fromCoin (Coin 0)
+                        , reward = ApiAmount.fromCoin (Coin 0)
+                        }
+                , assets =
+                    ApiWalletAssetsBalance
+                        { available = ApiWalletAssets.fromTokenMap mempty
+                        , total = ApiWalletAssets.fromTokenMap mempty
+                        }
+                , delegation =
+                    ApiWalletDelegation
+                        { active =
+                            ApiWalletDelegationNext
+                                { status = NotDelegating
+                                , target = Nothing
+                                , voting = Nothing
+                                , changesAt = Nothing
+                                }
+                        , next = []
+                        }
+                , rewardAccountKey = Nothing
+                , addressPoolGap = ApiT defaultAddressPoolGap
+                , addressDerivationMode = AccountModeHD
+                , state = ApiT progress
+                , tip = tip'
+                }
+  where
+    accountIx = Index $ getDerivationIndex $ getApiT $ body ^. #accountIndex
+    pwd = getApiT $ body ^. #passphrase
+
+getWalletAccount
+    :: forall ctx s n k
+     . ( ctx ~ ApiLayer s
+       , s ~ SeqState n k
+       , Seq.SupportsDiscovery n k
+       , Excluding '[ByronKey, SharedKey] k
+       , WalletFlavor s
+       )
+    => ctx
+    -> ApiT WalletId
+    -> ApiT DerivationIndex
+    -> Handler ApiAccount
+getWalletAccount ctx (ApiT wid) (ApiT (DerivationIndex accountIxW)) =
+    withWorkerCtx @_ @s ctx wid liftE liftE $ \wrk -> do
+        liftHandler $ checkAccountExists wrk
+        (cp, _, _) <- handler $ readWallet wrk
+        progress <- liftIO $ walletSyncProgress @_ @_ ctx cp
+        let ti = timeInterpreter (ctx ^. networkLayer)
+        tip' <- liftIO
+            $ getWalletTip
+                (neverFails "getWalletTip for getWalletAccount" ti)
+                cp
+        pure
+            ApiAccount
+                { accountIndex = ApiT (DerivationIndex accountIxW)
+                , balance =
+                    ApiWalletBalance
+                        { available = ApiAmount.fromCoin (Coin 0)
+                        , total = ApiAmount.fromCoin (Coin 0)
+                        , reward = ApiAmount.fromCoin (Coin 0)
+                        }
+                , assets =
+                    ApiWalletAssetsBalance
+                        { available = ApiWalletAssets.fromTokenMap mempty
+                        , total = ApiWalletAssets.fromTokenMap mempty
+                        }
+                , delegation =
+                    ApiWalletDelegation
+                        { active =
+                            ApiWalletDelegationNext
+                                { status = NotDelegating
+                                , target = Nothing
+                                , voting = Nothing
+                                , changesAt = Nothing
+                                }
+                        , next = []
+                        }
+                , rewardAccountKey = Nothing
+                , addressPoolGap = ApiT defaultAddressPoolGap
+                , addressDerivationMode = AccountModeHD
+                , state = ApiT progress
+                , tip = tip'
+                }
+  where
+    -- The default account 0H is stored as index 0 in the DB; all others use
+    -- their raw hardened Word32. Handle both cases for the existence check.
+    checkAccountExists wrk = do
+        let minIx = getIndex (minBound :: Index 'Hardened 'AccountK)
+        if accountIxW == minIx
+            then pure ()  -- 0H is always present
+            else do
+                accounts <- lift $ listWalletAccounts wrk
+                unless (accountIxW `elem` accounts)
+                    $ throwE ErrGetAccountNotFound
+
+getWalletAccountUtxoStatistics
+    :: forall ctx s n k
+     . ( ctx ~ ApiLayer s
+       , s ~ SeqState n k
+       , Seq.SupportsDiscovery n k
+       , Excluding '[ByronKey, SharedKey] k
+       , WalletFlavor s
+       )
+    => ctx
+    -> ApiT WalletId
+    -> ApiT DerivationIndex
+    -> Handler ApiUtxoStatistics
+getWalletAccountUtxoStatistics ctx (ApiT wid) (ApiT (DerivationIndex accountIxW)) =
+    withWorkerCtx @_ @s ctx wid liftE liftE $ \wrk -> do
+        liftHandler $ checkAccountExists wrk
+        stats <- liftIO $ listAccountUtxoStatistics wrk (Index accountIxW)
+        pure $ toApiUtxoStatistics stats
+  where
+    checkAccountExists wrk = do
+        let minIx = getIndex (minBound :: Index 'Hardened 'AccountK)
+        if accountIxW == minIx
+            then pure ()
+            else do
+                accounts <- lift $ listWalletAccounts wrk
+                unless (accountIxW `elem` accounts)
+                    $ throwE ErrGetAccountNotFound
+
+listWalletAccountsH
+    :: forall ctx s n k
+     . ( ctx ~ ApiLayer s
+       , s ~ SeqState n k
+       , Seq.SupportsDiscovery n k
+       , Excluding '[ByronKey, SharedKey] k
+       , WalletFlavor s
+       )
+    => ctx
+    -> ApiT WalletId
+    -> Handler [ApiAccount]
+listWalletAccountsH ctx (ApiT wid) =
+    withWorkerCtx @_ @s ctx wid liftE liftE $ \wrk -> do
+        (cp, _, _) <- handler $ readWallet wrk
+        progress <- liftIO $ walletSyncProgress @_ @_ ctx cp
+        let ti = timeInterpreter (ctx ^. networkLayer)
+        tip' <- liftIO
+            $ getWalletTip
+                (neverFails "getWalletTip for listWalletAccountsH" ti)
+                cp
+        accounts <- liftIO $ listWalletAccounts wrk
+        let minIx = getIndex (minBound :: Index 'Hardened 'AccountK)
+            -- Translate DB-stored 0 back to hardened 0H for the response
+            toHardenedIx w = if w == 0 then minIx else w
+            mkAccount w =
+                ApiAccount
+                    { accountIndex = ApiT (DerivationIndex (toHardenedIx w))
+                    , balance =
+                        ApiWalletBalance
+                            { available = ApiAmount.fromCoin (Coin 0)
+                            , total = ApiAmount.fromCoin (Coin 0)
+                            , reward = ApiAmount.fromCoin (Coin 0)
+                            }
+                    , assets =
+                        ApiWalletAssetsBalance
+                            { available = ApiWalletAssets.fromTokenMap mempty
+                            , total = ApiWalletAssets.fromTokenMap mempty
+                            }
+                    , delegation =
+                        ApiWalletDelegation
+                            { active =
+                                ApiWalletDelegationNext
+                                    { status = NotDelegating
+                                    , target = Nothing
+                                    , voting = Nothing
+                                    , changesAt = Nothing
+                                    }
+                            , next = []
+                            }
+                    , rewardAccountKey = Nothing
+                    , addressPoolGap = ApiT defaultAddressPoolGap
+                    , addressDerivationMode = AccountModeHD
+                    , state = ApiT progress
+                    , tip = tip'
+                    }
+        pure $ map mkAccount accounts
+
+-- | Delete a hardened account from an existing Shelley wallet.
+-- Returns 204 on success, 403 for the default account (0H), 404 if not found.
+deleteWalletAccountH
+    :: forall ctx s
+     . ctx ~ ApiLayer s
+    => ctx
+    -> ApiT WalletId
+    -> ApiT DerivationIndex
+    -> Handler NoContent
+deleteWalletAccountH ctx (ApiT wid) (ApiT (DerivationIndex accountIxW)) =
+    withWorkerCtx @_ @s ctx wid liftE liftE $ \wrk -> do
+        liftHandler
+            $ deleteWalletAccount wrk
+            $ (Index accountIxW :: Index 'Hardened 'AccountK)
+        return NoContent
+
+-- | List known addresses for a specific account, optionally filtered by state.
+listWalletAccountAddressesH
+    :: forall ctx s n k
+     . ( ctx ~ ApiLayer s
+       , s ~ SeqState n k
+       , CompareDiscovery s
+       , KnownAddresses s
+       )
+    => ctx
+    -> (s -> Address -> Maybe Address)
+    -> ApiT WalletId
+    -> ApiT DerivationIndex
+    -> Maybe (ApiT AddressState)
+    -> Handler [ApiAddressWithPath n]
+listWalletAccountAddressesH ctx normalize (ApiT wid) (ApiT (DerivationIndex accountIxW)) stateFilter =
+    withWorkerCtx @_ @s ctx wid liftE liftE $ \wrk -> do
+        addrs <- liftIO
+            $ listAccountAddresses wrk normalize
+            $ (Index accountIxW :: Index 'Hardened 'AccountK)
+        let filterCondition (_, state, _) = case stateFilter of
+                Nothing -> True
+                Just (ApiT s) -> state == s
+        return
+            $ coerceAddress
+            <$> filter filterCondition addrs
+  where
+    coerceAddress (a, s, p) =
+        ApiAddressWithPath (ApiAddress @n a) (ApiT s) (NE.map ApiT p)
+
 --------------------- Shelley
 postWallet
     :: forall ctx s k n
@@ -1176,9 +1452,16 @@ mkShelleyWallet
        )
     => MkApiWallet ctx s ApiWallet
 mkShelleyWallet ctx@ApiLayer{..} wid cp meta delegation pending progress = do
-    reward <- withWorkerCtx @_ @s ctx wid liftE liftE $ \wrk ->
-        -- never fails - returns zero if balance not found
-        liftIO $ W.fetchRewardBalance @s $ wrk ^. dbLayer
+    (reward, extraBalance) <-
+        withWorkerCtx @_ @s ctx wid liftE liftE $ \wrk -> liftIO $ do
+            -- never fails - returns zero if balance not found
+            r <- W.fetchRewardBalance @s $ wrk ^. dbLayer
+            extraIdxs <- listWalletAccounts wrk
+            utxos <-
+                mapM
+                    (\w32 -> readAccountUTxO wrk (Index w32 :: Index 'Hardened 'AccountK))
+                    extraIdxs
+            return (r, foldMap UTxO.balance utxos)
 
     let ti = timeInterpreter netLayer
 
@@ -1204,8 +1487,8 @@ mkShelleyWallet ctx@ApiLayer{..} wid cp meta delegation pending progress = do
             $ getWalletTip
                 (neverFails "getWalletTip wallet tip should be behind node tip" ti)
                 cp
-    let available = availableBalance pending cp
-    let total = totalBalance pending reward cp
+    let available = availableBalance pending cp `TokenBundle.add` extraBalance
+    let total = totalBalance pending reward cp `TokenBundle.add` extraBalance
     pure
         ApiWallet
             { addressPoolGap = ApiT $ getGap $ getState cp ^. #externalPool
@@ -2772,6 +3055,41 @@ deleteTransaction ctx (ApiT wid) (ApiTxId (ApiT (tid))) = do
         liftHandler
             $ W.forgetTx wrk tid
     return NoContent
+
+-- | List transactions for a specific account. For account 0H, delegates to the
+-- full wallet transaction list. Extra accounts return empty until per-account
+-- block scanning is wired up (T002-T010).
+listWalletAccountTransactionsH
+    :: forall s n
+     . ( HasDelegation s
+       , WalletFlavor s
+       )
+    => ApiLayer s
+    -> ApiT WalletId
+    -> ApiT DerivationIndex
+    -> Maybe MinWithdrawal
+    -> Maybe Iso8601Time
+    -> Maybe Iso8601Time
+    -> Maybe (ApiT SortOrder)
+    -> Maybe ApiLimit
+    -> Maybe (ApiAddress n)
+    -> Bool
+    -> Handler [ApiTransaction n]
+listWalletAccountTransactionsH
+    ctx
+    wid
+    (ApiT (DerivationIndex accountIxW))
+    mMinWithdrawal
+    mStart
+    mEnd
+    mOrder
+    mLimit
+    mAddress
+    simpleMetadataFlag
+        | Index accountIxW == (minBound :: Index 'Hardened 'AccountK) =
+            listTransactions ctx wid mMinWithdrawal mStart mEnd mOrder mLimit mAddress
+                $ if simpleMetadataFlag then TxMetadataNoSchema else TxMetadataDetailedSchema
+        | otherwise = return []
 
 listTransactions
     :: forall s n

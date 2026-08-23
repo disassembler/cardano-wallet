@@ -114,6 +114,7 @@ mkTxMetaEntity wid tx derived =
     TxMeta
         { txMetaTxId = TxId $ tx ^. #txId
         , txMetaWalletId = wid
+        , txMetaAccountIndex = 0
         , txMetaStatus = derived ^. #status
         , txMetaDirection = derived ^. #direction
         , txMetaSlot = derived ^. #slotNo

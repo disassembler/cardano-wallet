@@ -173,6 +173,10 @@ data ChangeAddressMode
       SingleChangeAddress
     | -- | For every change output, increase a counter and derive an address from that.
       IncreasingChangeAddresses
+    | -- | Route all change to the account's external /0/0 address; never
+      -- derive or use internal-chain (/1/N) keys. For hardware-wallet
+      -- compatibility.
+      SingleExternalAddress
     deriving stock (Generic, Show, Eq)
 
 instance NFData ChangeAddressMode
@@ -180,6 +184,7 @@ instance NFData ChangeAddressMode
 instance Buildable ChangeAddressMode where
     build SingleChangeAddress = fromString "single change address mode"
     build IncreasingChangeAddresses = fromString "increasing change address mode"
+    build SingleExternalAddress = fromString "single external address mode"
 
 {-------------------------------------------------------------------------------
                         Pending Tx Change Indexes

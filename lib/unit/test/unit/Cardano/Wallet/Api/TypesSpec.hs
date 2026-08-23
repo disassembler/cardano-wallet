@@ -105,10 +105,12 @@ import Cardano.Wallet.Api
     ( Api
     )
 import Cardano.Wallet.Api.Types
-    ( AccountPostData (..)
+    ( AccountMode (..)
+    , AccountPostData (..)
     , AddressAmount (..)
     , AddressAmountNoAssets (..)
     , AnyAddress (..)
+    , ApiAccount (..)
     , ApiAccountKey (..)
     , ApiAccountKeyShared (..)
     , ApiAccountPublicKey (..)
@@ -137,6 +139,7 @@ import Cardano.Wallet.Api.Types
     , ApiCoinSelectionCollateral (..)
     , ApiCoinSelectionOutput (..)
     , ApiCoinSelectionWithdrawal (..)
+    , ApiConsolidateRequest (..)
     , ApiConstructTransaction (..)
     , ApiConstructTransactionData (..)
     , ApiCosignerIndex (..)
@@ -179,6 +182,7 @@ import Cardano.Wallet.Api.Types
     , ApiPaymentDestination (..)
     , ApiPolicyId (..)
     , ApiPolicyKey (..)
+    , ApiPostAccount (..)
     , ApiPostAccountKeyData (..)
     , ApiPostAccountKeyDataWithPurpose
     , ApiPostPolicyIdData (..)
@@ -195,6 +199,7 @@ import Cardano.Wallet.Api.Types
     , ApiSelectCoinsPayments (..)
     , ApiSelfWithdrawalPostData (..)
     , ApiSerialisedTransaction (..)
+    , ApiSetAccountMode (..)
     , ApiSharedWallet (..)
     , ApiSharedWalletPatchData (..)
     , ApiSharedWalletPostData (..)
@@ -3016,6 +3021,26 @@ instance Arbitrary ApiHealthCheck where
     arbitrary = genericArbitrary
     shrink = genericShrink
 
+instance Arbitrary ApiPostAccount where
+    arbitrary = genericArbitrary
+    shrink = genericShrink
+
+instance Arbitrary AccountMode where
+    arbitrary = genericArbitrary
+    shrink = genericShrink
+
+instance Arbitrary ApiAccount where
+    arbitrary = genericArbitrary
+    shrink = genericShrink
+
+instance Arbitrary ApiSetAccountMode where
+    arbitrary = genericArbitrary
+    shrink = genericShrink
+
+instance Arbitrary ApiConsolidateRequest where
+    arbitrary = genericArbitrary
+    shrink = genericShrink
+
 instance Arbitrary ApiPostAccountKeyData where
     arbitrary = genericArbitrary
     shrink = genericShrink
@@ -3407,6 +3432,21 @@ instance ToSchema ApiWalletSignData where
         addDefinition
             =<< declareSchemaForDefinition "TransactionMetadataValueNoSchema"
         declareSchemaForDefinition "ApiWalletSignData"
+
+instance ToSchema ApiPostAccount where
+    declareNamedSchema _ = declareSchemaForDefinition "ApiPostAccount"
+
+instance ToSchema ApiAccount where
+    declareNamedSchema _ = declareSchemaForDefinition "ApiAccount"
+
+instance ToSchema ApiSetAccountMode where
+    declareNamedSchema _ = declareSchemaForDefinition "ApiSetAccountMode"
+
+instance ToSchema ApiConsolidateRequest where
+    declareNamedSchema _ = declareSchemaForDefinition "ApiConsolidateRequest"
+
+instance ToSchema AccountMode where
+    declareNamedSchema _ = declareSchemaForDefinition "AccountMode"
 
 instance ToSchema ApiPostAccountKeyData where
     declareNamedSchema _ = declareSchemaForDefinition "ApiPostAccountKeyData"

@@ -3,10 +3,13 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
 
 module Cardano.Wallet.Address.Keys.SequentialAny
     ( mkSeqAnyState
     , mkSeqStateFromRootXPrv
+    , mkSeqStateForAccount
     )
 where
 
@@ -30,9 +33,12 @@ import Cardano.Wallet.Address.Discovery
     )
 import Cardano.Wallet.Address.Discovery.Sequential
     ( AddressPoolGap
-    , SeqState
+    , DerivationPrefix (..)
+    , SeqState (..)
     , SupportsDiscovery
+    , coinTypeAda
     , mkSeqStateFromAccountXPub
+    , purposeCIP1852
     )
 import Cardano.Wallet.Address.Discovery.SequentialAny
     ( SeqAnyState (..)
@@ -102,3 +108,41 @@ mkSeqStateFromRootXPrv kF (RootCredentials rootXPrv pwd) =
         $ publicKey kF
         $ liftRawKey kF
         $ derivePolicyPrivateKey pwd (getRawKey kF rootXPrv) minBound
+
+-- | Construct a 'SeqState' for a specific hardened account index, using the
+-- Shelley (CIP-1852) purpose.  Unlike 'mkSeqStateFromRootXPrv', the caller
+-- provides the account index explicitly — enabling wallets with multiple
+-- accounts derived from the same root key.
+mkSeqStateForAccount
+    :: forall n k
+     . ( SupportsDiscovery n k
+       , Excluding '[ByronKey, SharedKey] k
+       )
+    => KeyFlavorS k
+    -> Index 'Hardened 'AccountK
+    -> ClearCredentials k
+    -> AddressPoolGap
+    -> ChangeAddressMode
+    -> SeqState n k
+mkSeqStateForAccount
+    kF
+    accountIx
+    (RootCredentials rootXPrv pwd)
+    gap
+    changeMode =
+        let base :: SeqState n k
+            base =
+                mkSeqStateFromAccountXPub @n
+                    (publicKey kF $ deriveAccountPrivateKey pwd rootXPrv accountIx)
+                    ( Just
+                        $ publicKey kF
+                        $ liftRawKey kF
+                        $ derivePolicyPrivateKey pwd (getRawKey kF rootXPrv) minBound
+                    )
+                    purposeCIP1852
+                    gap
+                    changeMode
+        in  base
+                { derivationPrefix =
+                    DerivationPrefix (purposeCIP1852, coinTypeAda, accountIx)
+                }

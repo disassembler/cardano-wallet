@@ -122,6 +122,16 @@ module Cardano.Wallet
     , getCurrentEpochSlotting
     , setChangeAddressMode
     , setChangeAddressModeShared
+    , addWalletAccount
+    , listWalletAccounts
+    , deleteWalletAccount
+    , readAccountUTxO
+    , listAccountUtxoStatistics
+    , listAccountAddresses
+    , AccountSummary
+    , ErrAddAccount (..)
+    , ErrDeleteAccount (..)
+    , ErrGetAccount (..)
     , assertIsVoting
     , assertDifferentVoting
 
@@ -407,8 +417,11 @@ import Cardano.Wallet.Address.Discovery.Random
     )
 import Cardano.Wallet.Address.Discovery.Sequential
     ( SeqState (..)
+    , SupportsDiscovery
     , defaultAddressPoolGap
+    , mkSeqStateFromAccountXPub
     , purposeBIP44
+    , purposeCIP1852
     )
 import Cardano.Wallet.Address.Discovery.Shared
     ( CredentialType (..)
@@ -421,7 +434,8 @@ import Cardano.Wallet.Address.Keys.BoundedAddressLength
     ( maxLengthAddressFor
     )
 import Cardano.Wallet.Address.Keys.SequentialAny
-    ( mkSeqStateFromRootXPrv
+    ( mkSeqStateForAccount
+    , mkSeqStateFromRootXPrv
     )
 import Cardano.Wallet.Address.Keys.Shared
     ( addCosignerAccXPub
@@ -4930,6 +4944,224 @@ setChangeAddressModeShared ctx mode =
         let (SharedPrologue sharedState) = WS.prologue s
             sharedState' = sharedState & #changeAddressMode .~ mode
         in  [ReplacePrologue $ SharedPrologue sharedState']
+
+-- | Summary of a single account returned by 'listWalletAccounts'.
+-- Contains the raw account index and the current address discovery state.
+data AccountSummary s = AccountSummary
+    { acctSummaryIndex :: Index 'Hardened 'AccountK
+    , acctSummaryState :: s
+    }
+
+-- | Error returned when 'addWalletAccount' fails.
+data ErrAddAccount
+    = ErrAddAccountDuplicate
+    -- ^ An account with this index already exists.
+    | ErrAddAccountWithRootKey ErrWithRootKey
+    -- ^ Could not decrypt the root key.
+    | ErrAddAccountV2NotSupported
+    -- ^ V2 key format is not yet supported for multi-account derivation.
+    deriving (Eq, Show)
+
+-- | Error returned when 'deleteWalletAccount' fails.
+data ErrDeleteAccount
+    = ErrDeleteAccountIsDefault
+    -- ^ Account 0H cannot be deleted.
+    | ErrDeleteAccountNotFound
+    -- ^ No such account index in this wallet.
+    deriving (Eq, Show)
+
+-- | Add a new hardened account to an existing Shelley wallet.
+-- Derives a fresh 'SeqState' from the wallet's root key at @accountIx@
+-- and persists it independently of account 0H.
+-- Returns 'ErrAddAccountDuplicate' if the index already exists.
+addWalletAccount
+    :: forall s n k
+     . ( s ~ SeqState n k
+       , SupportsDiscovery n k
+       , Excluding '[ByronKey, SharedKey] k
+       , WalletFlavor s
+       )
+    => WalletLayer IO s
+    -> Index 'Hardened 'AccountK
+    -> Passphrase "user"
+    -> ExceptT ErrAddAccount IO ()
+addWalletAccount ctx accountIx pwd =
+    db & \DBLayer{..} -> do
+        -- Account 0H is the default account, always stored separately; refuse it here.
+        when (accountIx == minBound) $ throwE ErrAddAccountDuplicate
+        existing <- lift $ atomically listSeqAccounts
+        when (accountIxW `elem` existing)
+            $ throwE ErrAddAccountDuplicate
+        withRootKey tr db walletId_ pwd ErrAddAccountWithRootKey $ \case
+            RootKeyAccessV1 rootXPrv scheme ->
+                let encPwd = preparePassphrase scheme pwd
+                    seqState =
+                        mkSeqStateForAccount
+                            kF
+                            accountIx
+                            (RootCredentials rootXPrv encPwd)
+                            defaultAddressPoolGap
+                            IncreasingChangeAddresses
+                in  lift
+                        $ onWalletState ctx
+                        $ update
+                        $ \_ -> [InsertExtraPrologue accountIxW (SeqPrologue seqState)]
+            RootKeyAccessV2 ekey _ userPwd -> do
+                let deriveKey path =
+                        foldM
+                            ( \ek pathIx ->
+                                encryptedDerivePrivate DerivationScheme2 ek userPwd pathIx
+                                    >>= either
+                                        (error . ("addWalletAccount V2: " <>) . show)
+                                        pure
+                            )
+                            ekey
+                            path
+                    toRawXPub derived =
+                        let pubBytes = publicKeyByteString (encryptedPublic derived)
+                            ccBytes = chainCodeByteString (encryptedChainCode derived)
+                        in  case xpub (pubBytes <> ccBytes) of
+                                Left e -> error $ "addWalletAccount V2 xpub: " <> e
+                                Right xp -> xp
+                    accountPath =
+                        [ getIndex purposeCIP1852
+                        , getIndex coinTypeAda
+                        , accountIxW
+                        ]
+                    policyPath =
+                        [ getIndex purposeCIP1855
+                        , getIndex coinTypeAda
+                        , getIndex (minBound :: Index 'Hardened 'PolicyK)
+                        ]
+                accountXPub <- lift $ liftRawKey kF . toRawXPub <$> deriveKey accountPath
+                policyXPub <- lift $ liftRawKey kF . toRawXPub <$> deriveKey policyPath
+                let seqState :: SeqState n k
+                    seqState =
+                        (mkSeqStateFromAccountXPub @n
+                            accountXPub
+                            (Just policyXPub)
+                            purposeCIP1852
+                            defaultAddressPoolGap
+                            IncreasingChangeAddresses)
+                        { derivationPrefix = DerivationPrefix (purposeCIP1852, coinTypeAda, accountIx) }
+                lift
+                    $ onWalletState ctx
+                    $ update
+                    $ \_ -> [InsertExtraPrologue accountIxW (SeqPrologue seqState)]
+  where
+    db = ctx ^. dbLayer
+    tr = contramap MsgWallet (logger_ ctx)
+    kF = keyFlavorFromState @s
+    accountIxW = getIndex accountIx
+
+-- | List all account indices registered for a Shelley wallet.
+listWalletAccounts
+    :: forall s
+     . WalletLayer IO s
+    -> IO [Word32]
+listWalletAccounts ctx =
+    db & \DBLayer{..} -> atomically listSeqAccounts
+  where
+    db = ctx ^. dbLayer
+
+-- | Delete the account at @accountIx@ from a Shelley wallet.
+-- Returns 'ErrDeleteAccountIsDefault' when @accountIx == minBound@ (0H).
+-- Returns 'ErrDeleteAccountNotFound' if the index has not been registered.
+deleteWalletAccount
+    :: WalletLayer IO s
+    -> Index 'Hardened 'AccountK
+    -> ExceptT ErrDeleteAccount IO ()
+deleteWalletAccount ctx accountIx = do
+    when (accountIx == minBound) $ throwE ErrDeleteAccountIsDefault
+    db & \DBLayer{..} -> do
+        existing <- lift $ atomically listSeqAccounts
+        unless (accountIxW `elem` existing)
+            $ throwE ErrDeleteAccountNotFound
+        lift
+            $ onWalletState ctx
+            $ update
+            $ \_ -> [DeleteExtraPrologue accountIxW]
+  where
+    db = ctx ^. dbLayer
+    accountIxW = getIndex accountIx
+
+-- | Error returned when looking up a specific wallet account fails.
+data ErrGetAccount = ErrGetAccountNotFound
+    deriving (Eq, Show)
+
+-- | Read the available 'UTxO' scoped to a single account.
+-- For account 0H (minBound) the main wallet checkpoint is used directly.
+-- For other accounts the per-account 'SeqState' is loaded from the DB.
+readAccountUTxO
+    :: forall s n k
+     . ( s ~ SeqState n k
+       , IsOurs s Address
+       )
+    => WalletLayer IO s
+    -> Index 'Hardened 'AccountK
+    -> IO UTxO
+readAccountUTxO ctx accountIx
+    | accountIx == minBound = defaultAccountUTxO
+    | otherwise = do
+        mSt <- db & \DBLayer{..} ->
+            atomically $ readSeqStateForAccount (getIndex accountIx)
+        case mSt of
+            Nothing -> pure UTxO.empty
+            Just seqSt -> do
+                (utxo, _, _) <- readWalletUTxO ctx
+                pure $ UTxO.filterByAddress (isJust . fst . (`isOurs` seqSt)) utxo
+  where
+    db = ctx ^. dbLayer
+    defaultAccountUTxO = do
+        (utxo, cp, _pending) <- readWalletUTxO ctx
+        let seqSt = getState cp
+        pure $ UTxO.filterByAddress (isJust . fst . (`isOurs` seqSt)) utxo
+
+-- | Compute UTxO distribution statistics scoped to a single account.
+listAccountUtxoStatistics
+    :: forall s n k
+     . ( s ~ SeqState n k
+       , IsOurs s Address
+       )
+    => WalletLayer IO s
+    -> Index 'Hardened 'AccountK
+    -> IO UTxOStatistics
+listAccountUtxoStatistics ctx accountIx = do
+    utxo <- readAccountUTxO ctx accountIx
+    pure $ UTxOStatistics.compute utxo
+
+-- | List all known addresses for a specific account, sorted by discovery order.
+-- Account 0H uses the current checkpoint; extra accounts load their SeqState from the DB.
+listAccountAddresses
+    :: forall s n k
+     . ( s ~ SeqState n k
+       , CompareDiscovery s
+       , KnownAddresses s
+       )
+    => WalletLayer IO s
+    -> (s -> Address -> Maybe Address)
+    -> Index 'Hardened 'AccountK
+    -> IO [(Address, AddressState, NonEmpty DerivationIndex)]
+listAccountAddresses ctx normalize accountIx
+    | accountIx == minBound = do
+        cp <- db & \DBLayer{..} -> atomically readCheckpoint
+        let s = getState cp
+        return
+            $ L.sortBy (\(a, _, _) (b, _, _) -> compareDiscovery s a b)
+            $ mapMaybe (\(addr, st, path) -> (,st,path) <$> normalize s addr)
+            $ knownAddresses s
+    | otherwise = do
+        mSt <- db & \DBLayer{..} ->
+            atomically $ readSeqStateForAccount (getIndex accountIx)
+        case mSt of
+            Nothing -> return []
+            Just seqSt ->
+                return
+                    $ L.sortBy (\(a, _, _) (b, _, _) -> compareDiscovery seqSt a b)
+                    $ mapMaybe (\(addr, st, path) -> (,st,path) <$> normalize seqSt addr)
+                    $ knownAddresses seqSt
+  where
+    db = ctx ^. dbLayer
 
 -- | Retrieve any public account key of a wallet.
 getAccountPublicKeyAtIndex

@@ -151,6 +151,11 @@ module Cardano.Wallet.Api.Types
     , ApiValidityInterval (..)
     , ApiVerificationKeyShared (..)
     , ApiVerificationKeyShelley (..)
+    , AccountMode (..)
+    , ApiAccount (..)
+    , ApiConsolidateRequest (..)
+    , ApiPostAccount (..)
+    , ApiSetAccountMode (..)
     , ApiWallet (..)
     , ApiWalletAssetsBalance (..)
     , ApiWalletBalance (..)
@@ -992,6 +997,50 @@ data ApiWallet = ApiWallet
     }
     deriving (Eq, Generic, Show)
     deriving (FromJSON, ToJSON) via DefaultRecord ApiWallet
+    deriving anyclass (NFData)
+
+data AccountMode
+    = AccountModeHD
+    | AccountModeSingleAddress
+    deriving (Eq, Generic, Show)
+    deriving (FromJSON, ToJSON) via DefaultSum AccountMode
+    deriving anyclass (NFData)
+
+data ApiAccount = ApiAccount
+    { accountIndex :: !(ApiT DerivationIndex)
+    , balance :: !ApiWalletBalance
+    , assets :: !ApiWalletAssetsBalance
+    , delegation :: !ApiWalletDelegation
+    , rewardAccountKey :: !(Maybe Text)
+    , addressPoolGap :: !(ApiT AddressPoolGap)
+    , addressDerivationMode :: !AccountMode
+    , state :: !(ApiT SyncProgress)
+    , tip :: !ApiBlockReference
+    }
+    deriving (Eq, Generic, Show)
+    deriving (FromJSON, ToJSON) via DefaultRecord ApiAccount
+    deriving anyclass (NFData)
+
+data ApiPostAccount = ApiPostAccount
+    { accountIndex :: ApiT DerivationIndex
+    , passphrase :: ApiT (Passphrase "user")
+    }
+    deriving (Eq, Generic, Show)
+    deriving (FromJSON, ToJSON) via DefaultRecord ApiPostAccount
+    deriving anyclass (NFData)
+
+newtype ApiSetAccountMode = ApiSetAccountMode
+    { mode :: AccountMode
+    }
+    deriving (Eq, Generic, Show)
+    deriving (FromJSON, ToJSON) via DefaultRecord ApiSetAccountMode
+    deriving anyclass (NFData)
+
+newtype ApiConsolidateRequest = ApiConsolidateRequest
+    { passphrase :: ApiT (Passphrase "user")
+    }
+    deriving (Eq, Generic, Show)
+    deriving (FromJSON, ToJSON) via DefaultRecord ApiConsolidateRequest
     deriving anyclass (NFData)
 
 data ApiWalletBalance = ApiWalletBalance

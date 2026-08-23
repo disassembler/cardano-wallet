@@ -151,6 +151,9 @@ import Data.Store
 import Data.Traversable
     ( for
     )
+import Data.Word
+    ( Word32
+    )
 import GHC.Num
     ( Natural
     )
@@ -279,6 +282,15 @@ data DBLayer m s = forall stm. (MonadIO stm, MonadFail stm) => DBLayer
         :: stm Version
     -- ^ Get the version of the schema currently stored in the database.
     -- Only used for internal consistency checks.
+    , listSeqAccounts
+        :: stm [Word32]
+    -- ^ List all hardened account indices persisted for this wallet.
+    -- For a fresh wallet, returns @[0]@.  For a multi-account wallet,
+    -- returns @[0, 1, …, N]@ sorted ascending.
+    , readSeqStateForAccount
+        :: Word32 -> stm (Maybe s)
+    -- ^ Read the address-discovery state for an additional account index.
+    -- Returns 'Nothing' for non-sequential wallet types or unknown indices.
     , atomically
         :: forall a. stm a -> m a
     -- ^ Execute operations of the database in isolation and atomically.
@@ -357,6 +369,13 @@ data DBLayerCollection stm m s = DBLayerCollection
         :: forall a. stm a -> m a
     , transactionsStore_
         :: Store stm QueryTxWalletsHistory DeltaTxWalletsHistory
+    , listSeqAccounts_
+        :: stm [Word32]
+    -- ^ List all account indices persisted for this wallet.
+    , readSeqStateForAccount_
+        :: Word32 -> stm (Maybe s)
+    -- ^ Read the address-discovery state for an additional account.
+    -- Returns Nothing for non-sequential wallets or unknown account indices.
     }
 
 {- HLINT ignore mkDBLayerFromParts "Avoid lambda" -}
@@ -434,6 +453,8 @@ mkDBLayerFromParts ti wid_ DBLayerCollection{..} =
         , readGenesisParameters = readGenesisParameters_ dbCheckpoints
         , rollbackTo = rollbackTo_
         , getSchemaVersion = getSchemaVersion_
+        , listSeqAccounts = listSeqAccounts_
+        , readSeqStateForAccount = readSeqStateForAccount_
         , atomically = atomically_
         }
   where

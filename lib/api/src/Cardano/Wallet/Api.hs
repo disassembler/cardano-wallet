@@ -32,6 +32,17 @@ module Cardano.Wallet.Api
     , PutWalletPassphrase
     , GetUTxOsStatistics
     , GetWalletUtxoSnapshot
+    , WalletAccounts
+    , PostWalletAccount
+    , ListWalletAccounts
+    , GetWalletAccount
+    , DeleteWalletAccount
+    , ListWalletAccountAddresses
+    , GetWalletAccountUTxOsStatistics
+    , CreateWalletAccountTransaction
+    , ListWalletAccountTransactions
+    , PutWalletAccountMode
+    , PostWalletAccountConsolidate
     , WalletKeys
     , GetWalletKey
     , SignMetadata
@@ -175,6 +186,7 @@ import Cardano.Wallet.Address.Derivation
     )
 import Cardano.Wallet.Api.Types
     ( AnyAddress
+    , ApiAccount
     , ApiAccountKey
     , ApiAccountKeyShared
     , ApiAddressData
@@ -186,6 +198,7 @@ import Cardano.Wallet.Api.Types
     , ApiBalanceTransactionPostDataT
     , ApiByronWallet
     , ApiCoinSelectionT
+    , ApiConsolidateRequest
     , ApiConstructTransactionDataT
     , ApiConstructTransactionT
     , ApiDRepInfo
@@ -203,6 +216,7 @@ import Cardano.Wallet.Api.Types
     , ApiPolicyId
     , ApiPolicyKey
     , ApiPoolSpecifier
+    , ApiPostAccount
     , ApiPostAccountKeyData
     , ApiPostAccountKeyDataWithPurpose
     , ApiPostPolicyIdData
@@ -211,6 +225,7 @@ import Cardano.Wallet.Api.Types
     , ApiPutAddressesDataT
     , ApiSelectCoinsDataT
     , ApiSerialisedTransaction
+    , ApiSetAccountMode
     , ApiSharedWallet
     , ApiSharedWalletPatchData
     , ApiSharedWalletPostData
@@ -371,6 +386,7 @@ type ApiV2 n = "v2" :> Api n
 type Api n =
     Wallets
         :<|> WalletKeys
+        :<|> WalletAccounts n
         :<|> Assets
         :<|> Addresses n
         :<|> CoinSelections n
@@ -472,6 +488,110 @@ type GetUTxOsStatistics =
         :> "statistics"
         :> "utxos"
         :> Get '[JSON] ApiUtxoStatistics
+
+{-------------------------------------------------------------------------------
+                                  Wallet Accounts
+-------------------------------------------------------------------------------}
+
+type WalletAccounts n =
+    PostWalletAccount
+        :<|> ListWalletAccounts
+        :<|> GetWalletAccount
+        :<|> DeleteWalletAccount
+        :<|> ListWalletAccountAddresses n
+        :<|> GetWalletAccountUTxOsStatistics
+        :<|> CreateWalletAccountTransaction n
+        :<|> ListWalletAccountTransactions n
+        :<|> PutWalletAccountMode
+        :<|> PostWalletAccountConsolidate n
+
+type PostWalletAccount =
+    "wallets"
+        :> Capture "walletId" (ApiT WalletId)
+        :> "accounts"
+        :> ReqBody '[JSON] ApiPostAccount
+        :> PostCreated '[JSON] ApiAccount
+
+type ListWalletAccounts =
+    "wallets"
+        :> Capture "walletId" (ApiT WalletId)
+        :> "accounts"
+        :> Get '[JSON] [ApiAccount]
+
+type GetWalletAccount =
+    "wallets"
+        :> Capture "walletId" (ApiT WalletId)
+        :> "accounts"
+        :> Capture "accountIndex" (ApiT DerivationIndex)
+        :> Get '[JSON] ApiAccount
+
+type DeleteWalletAccount =
+    "wallets"
+        :> Capture "walletId" (ApiT WalletId)
+        :> "accounts"
+        :> Capture "accountIndex" (ApiT DerivationIndex)
+        :> DeleteNoContent
+
+type ListWalletAccountAddresses n =
+    "wallets"
+        :> Capture "walletId" (ApiT WalletId)
+        :> "accounts"
+        :> Capture "accountIndex" (ApiT DerivationIndex)
+        :> "addresses"
+        :> QueryParam "state" (ApiT AddressState)
+        :> Get '[JSON] [ApiAddressT n]
+
+type GetWalletAccountUTxOsStatistics =
+    "wallets"
+        :> Capture "walletId" (ApiT WalletId)
+        :> "accounts"
+        :> Capture "accountIndex" (ApiT DerivationIndex)
+        :> "statistics"
+        :> "utxos"
+        :> Get '[JSON] ApiUtxoStatistics
+
+type CreateWalletAccountTransaction n =
+    "wallets"
+        :> Capture "walletId" (ApiT WalletId)
+        :> "accounts"
+        :> Capture "accountIndex" (ApiT DerivationIndex)
+        :> "transactions"
+        :> ReqBody '[JSON] (PostTransactionOldDataT n)
+        :> PostAccepted '[JSON] (ApiTransactionT n)
+
+type ListWalletAccountTransactions n =
+    "wallets"
+        :> Capture "walletId" (ApiT WalletId)
+        :> "accounts"
+        :> Capture "accountIndex" (ApiT DerivationIndex)
+        :> "transactions"
+        :> QueryParam "minWithdrawal" MinWithdrawal
+        :> QueryParam "start" Iso8601Time
+        :> QueryParam "end" Iso8601Time
+        :> QueryParam "order" (ApiT SortOrder)
+        :> QueryParam "max_count" ApiLimit
+        :> QueryParam "address" (ApiAddressIdT n)
+        :> QueryFlag "simple-metadata"
+        :> Get '[JSON] [ApiTransactionT n]
+
+type PutWalletAccountMode =
+    "wallets"
+        :> Capture "walletId" (ApiT WalletId)
+        :> "accounts"
+        :> Capture "accountIndex" (ApiT DerivationIndex)
+        :> "mode"
+        :> ReqBody '[JSON] ApiSetAccountMode
+        :> Put '[JSON] ApiAccount
+
+type PostWalletAccountConsolidate n =
+    "wallets"
+        :> Capture "walletId" (ApiT WalletId)
+        :> "accounts"
+        :> Capture "accountIndex" (ApiT DerivationIndex)
+        :> "utxo"
+        :> "consolidate"
+        :> ReqBody '[JSON] ApiConsolidateRequest
+        :> PostAccepted '[JSON] (ApiTransactionT n)
 
 {-------------------------------------------------------------------------------
                                   Wallet Keys

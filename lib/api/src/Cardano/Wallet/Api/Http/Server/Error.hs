@@ -51,7 +51,8 @@ import Cardano.Ledger.Coin
     ( Coin
     )
 import Cardano.Wallet
-    ( ErrAddCosignerKey (..)
+    ( ErrAddAccount (..)
+    , ErrAddCosignerKey (..)
     , ErrCannotJoin (..)
     , ErrCannotQuit (..)
     , ErrCannotVote (..)
@@ -60,6 +61,8 @@ import Cardano.Wallet
     , ErrCreateMigrationPlan (..)
     , ErrCreateRandomAddress (..)
     , ErrDecodeTx (..)
+    , ErrDeleteAccount (..)
+    , ErrGetAccount (..)
     , ErrDerivePublicKey (..)
     , ErrFetchRewards (..)
     , ErrGetPolicyId (..)
@@ -1446,3 +1449,28 @@ instance IsServerError WriteTx.ErrInvalidTxOutInEra where
                 err400
                 BalanceTxNativeScriptNotSupportedInConway
                 "Native scripts are not supported in the Conway era."
+
+instance IsServerError ErrAddAccount where
+    toServerError = \case
+        ErrAddAccountDuplicate ->
+            apiError err409 WalletAlreadyExists
+                "An account with this index already exists in the wallet."
+        ErrAddAccountWithRootKey e -> toServerError e
+        ErrAddAccountV2NotSupported ->
+            apiError err501 NotImplemented
+                "Multi-account derivation is not yet supported for V2 key format."
+
+instance IsServerError ErrDeleteAccount where
+    toServerError = \case
+        ErrDeleteAccountIsDefault ->
+            apiError err403 RejectedByCoreNode
+                "The default account (index 0H) cannot be deleted."
+        ErrDeleteAccountNotFound ->
+            apiError err404 NotFound
+                "No account with this index exists in the wallet."
+
+instance IsServerError ErrGetAccount where
+    toServerError = \case
+        ErrGetAccountNotFound ->
+            apiError err404 NotFound
+                "No account with this index exists in the wallet."
