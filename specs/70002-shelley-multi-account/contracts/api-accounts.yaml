@@ -1,0 +1,474 @@
+# API Contract: Wallet Account Sub-Resource
+# Feature: 70002-shelley-multi-account
+# Date: 2026-08-22
+#
+# This file documents the new REST endpoints added under /wallets/{walletId}/accounts.
+# It follows the conventions of specifications/api/swagger.yaml in the main repo.
+# These definitions are to be merged into that file during implementation.
+
+openapi: "3.0.0"
+
+info:
+  title: Cardano Wallet — Account Sub-Resource Contract
+  version: "0.1.0"
+
+# ---------------------------------------------------------------------------
+# Reusable schemas
+# ---------------------------------------------------------------------------
+components:
+  schemas:
+
+    ApiPostAccount:
+      type: object
+      required:
+        - account_index
+      properties:
+        account_index:
+          description: |
+            Hardened account index to create, e.g. "0H", "1H", "3H".
+            Any valid hardened BIP-32 index is accepted. Indices need not
+            be sequential — you may create "5H" without creating "1H"–"4H".
+          type: string
+          pattern: "^[0-9]+'?H$"
+          example: "1H"
+
+    ApiAccount:
+      type: object
+      required:
+        - account_index
+        - balance
+        - assets
+        - state
+        - tip
+      properties:
+        account_index:
+          description: Hardened account index, e.g. "0H", "1H", "3H".
+          type: string
+          example: "1H"
+        balance:
+          description: Balance summary for this account only (never aggregated across accounts).
+          $ref: "#/components/schemas/ApiWalletBalance"
+        assets:
+          description: Native asset balances for this account only.
+          $ref: "#/components/schemas/ApiWalletAssetsBalance"
+        delegation:
+          description: |
+            Current delegation status for this account's reward address
+            (m/1852H/1815H/NH/2/0). Each account has an independent reward address.
+          $ref: "#/components/schemas/ApiWalletDelegation"
+        reward_account_key:
+          description: Bech32-encoded reward/stake public key for this account.
+          type: string
+          example: "stake_xvk1..."
+        address_pool_gap:
+          description: The address discovery gap used for this account's address pools.
+          type: integer
+          minimum: 10
+          maximum: 100000
+          example: 20
+        address_derivation_mode:
+          description: |
+            Current change-address derivation mode for this account.
+            - `hd`: standard HD wallet behaviour — change goes to increasing `/1/N` internal addresses.
+            - `single_address`: hardware-wallet-compatible mode — change always goes to `/0/0`; no internal-chain keys are ever derived.
+          type: string
+          enum: [hd, single_address]
+          example: "hd"
+        state:
+          description: Sync progress for this account's address discovery.
+          $ref: "#/components/schemas/ApiSyncProgress"
+        tip:
+          description: The latest block seen during this account's sync.
+          $ref: "#/components/schemas/ApiBlockReference"
+
+    ApiAccountSummaryList:
+      type: array
+      items:
+        $ref: "#/components/schemas/ApiAccount"
+
+    ApiSetAccountMode:
+      type: object
+      required:
+        - mode
+      properties:
+        mode:
+          description: |
+            `hd` — standard increasing change addresses (default for new accounts).
+            `single_address` — all change routed to `/0/0`; no internal-chain keys used.
+          type: string
+          enum: [hd, single_address]
+          example: "single_address"
+
+    ApiConsolidateResponse:
+      type: object
+      required:
+        - complete
+      properties:
+        complete:
+          description: |
+            `true` if all UTXOs were swept in this call.
+            `false` if the account had more UTXOs than fit in one transaction; call again to continue.
+          type: boolean
+          example: true
+        transaction:
+          description: The submitted consolidation transaction, if one was constructed. Absent when `complete` is true and no transaction was needed (account already had a single UTXO at /0/0).
+          type: object
+
+  parameters:
+
+    parametersWalletId:
+      name: walletId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: hex
+        minLength: 40
+        maxLength: 40
+      example: "2512a00e9653fe49a44a5886202e24d77eeb998f"
+
+    parametersAccountIndex:
+      name: accountIndex
+      in: path
+      required: true
+      description: |
+        A hardened account derivation index. Must include the "H" suffix.
+        Examples: "0H", "1H", "3H", "100H".
+      schema:
+        type: string
+        pattern: "^[0-9]+H$"
+      example: "1H"
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+paths:
+
+  /wallets/{walletId}/accounts:
+    post:
+      operationId: postWalletAccount
+      tags: ["Accounts"]
+      summary: Add an Account
+      description: |
+        Add a new hardened account to an existing Shelley wallet. The caller
+        specifies the desired account index. Any valid hardened index may be
+        used — indices do not need to be sequential.
+
+        Account 0H is automatically created when the wallet is restored and
+        is always present; attempting to POST 0H returns 409 Conflict.
+
+        After creation, the account immediately begins on-chain address
+        discovery for that derivation path. The `state` field in the response
+        reflects discovery progress.
+      parameters:
+        - $ref: "#/components/parameters/parametersWalletId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApiPostAccount"
+      responses:
+        "201":
+          description: Account created successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiAccount"
+        "400":
+          description: Malformed request body or invalid account index.
+        "403":
+          description: |
+            Forbidden. Returned when attempting to create account 0H (already
+            exists and is permanent).
+        "404":
+          description: Wallet not found.
+        "409":
+          description: An account with this index already exists for this wallet.
+
+    get:
+      operationId: listWalletAccounts
+      tags: ["Accounts"]
+      summary: List Accounts
+      description: |
+        List all accounts registered under this Shelley wallet, ordered by
+        account index ascending. The wallet always has at least one account
+        (0H). Balance and sync state are reported independently per account.
+
+        The sum of all account balances equals the wallet's aggregate balance
+        as reported by GET /wallets/{walletId}.
+      parameters:
+        - $ref: "#/components/parameters/parametersWalletId"
+      responses:
+        "200":
+          description: List of accounts.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiAccountSummaryList"
+        "404":
+          description: Wallet not found.
+
+  /wallets/{walletId}/accounts/{accountIndex}:
+    get:
+      operationId: getWalletAccount
+      tags: ["Accounts"]
+      summary: Get Account
+      description: |
+        Retrieve details for a specific account index. Returns balance, asset
+        holdings, delegation status, and sync progress scoped to this account.
+      parameters:
+        - $ref: "#/components/parameters/parametersWalletId"
+        - $ref: "#/components/parameters/parametersAccountIndex"
+      responses:
+        "200":
+          description: Account details.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiAccount"
+        "404":
+          description: Wallet not found, or account index not registered for this wallet.
+
+    delete:
+      operationId: deleteWalletAccount
+      tags: ["Accounts"]
+      summary: Delete Account
+      description: |
+        Remove an account from the wallet. All address discovery state, UTXO
+        data, and transaction history for this account are permanently deleted.
+
+        Account 0H cannot be deleted and returns 403 Forbidden.
+        Accounts with a non-zero balance may be deleted (no balance check is
+        enforced — the caller is responsible for moving funds beforehand).
+      parameters:
+        - $ref: "#/components/parameters/parametersWalletId"
+        - $ref: "#/components/parameters/parametersAccountIndex"
+      responses:
+        "204":
+          description: Account deleted successfully.
+        "403":
+          description: Forbidden. Account 0H cannot be deleted.
+        "404":
+          description: Wallet not found, or account index not registered for this wallet.
+
+  /wallets/{walletId}/accounts/{accountIndex}/addresses:
+    get:
+      operationId: listWalletAccountAddresses
+      tags: ["Accounts", "Addresses"]
+      summary: List Addresses for Account
+      description: |
+        List all known addresses for a specific account. Only addresses derived
+        from this account's key (`m/1852H/1815H/accountIndex/role/index`) are
+        returned — addresses from other accounts are never included.
+
+        Use the `state` query parameter to filter by Used / Unused.
+      parameters:
+        - $ref: "#/components/parameters/parametersWalletId"
+        - $ref: "#/components/parameters/parametersAccountIndex"
+        - name: state
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [used, unused]
+          description: Filter addresses by their usage state.
+      responses:
+        "200":
+          description: List of addresses with derivation paths.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  description: Address with derivation path (same shape as GET /wallets/{walletId}/addresses).
+                  type: object
+        "404":
+          description: Wallet not found, or account index not registered for this wallet.
+
+  /wallets/{walletId}/accounts/{accountIndex}/utxo/statistics:
+    get:
+      operationId: getWalletAccountUtxoStatistics
+      tags: ["Accounts"]
+      summary: UTxO Statistics for Account
+      description: |
+        Return UTxO distribution statistics for a specific account. Only UTxOs
+        whose payment addresses belong to this account are included.
+      parameters:
+        - $ref: "#/components/parameters/parametersWalletId"
+        - $ref: "#/components/parameters/parametersAccountIndex"
+      responses:
+        "200":
+          description: UTxO statistics (same shape as GET /wallets/{walletId}/utxo/statistics).
+          content:
+            application/json:
+              schema:
+                type: object
+        "404":
+          description: Wallet not found, or account index not registered for this wallet.
+
+  /wallets/{walletId}/accounts/{accountIndex}/transactions:
+    post:
+      operationId: postWalletAccountTransaction
+      tags: ["Accounts", "Transactions"]
+      summary: Create Transaction from Account
+      description: |
+        Construct, sign, and submit a transaction using **only** UTxOs
+        belonging to this account. If the account has insufficient funds, the
+        request fails — the wallet never supplements from other accounts.
+
+        Request body is identical to POST /wallets/{walletId}/transactions.
+        Change outputs are sent to internal addresses of this account.
+      parameters:
+        - $ref: "#/components/parameters/parametersWalletId"
+        - $ref: "#/components/parameters/parametersAccountIndex"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              description: Same schema as POST /wallets/{walletId}/transactions.
+              type: object
+      responses:
+        "202":
+          description: Transaction submitted.
+        "403":
+          description: Forbidden (wrong passphrase, or other signing error).
+        "404":
+          description: Wallet not found, or account index not registered for this wallet.
+        "422":
+          description: |
+            Insufficient funds in this account. The wallet does NOT fall back
+            to other accounts.
+
+    get:
+      operationId: listWalletAccountTransactions
+      tags: ["Accounts", "Transactions"]
+      summary: List Transactions for Account
+      description: |
+        List all transactions that involve addresses belonging to this account.
+        Transactions that only touch other accounts' addresses are not included.
+      parameters:
+        - $ref: "#/components/parameters/parametersWalletId"
+        - $ref: "#/components/parameters/parametersAccountIndex"
+        - name: start
+          in: query
+          required: false
+          schema:
+            type: string
+            format: ISO 8601 date-time
+        - name: end
+          in: query
+          required: false
+          schema:
+            type: string
+            format: ISO 8601 date-time
+        - name: order
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [ascending, descending]
+      responses:
+        "200":
+          description: List of transactions (same shape as GET /wallets/{walletId}/transactions).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+        "404":
+          description: Wallet not found, or account index not registered for this wallet.
+
+  /wallets/{walletId}/accounts/{accountIndex}/mode:
+    put:
+      operationId: putWalletAccountMode
+      tags: ["Accounts"]
+      summary: Set Account Address Derivation Mode
+      description: |
+        Toggle the change-address derivation mode for a specific account.
+
+        **`hd`** (default): Change outputs use the internal derivation chain
+        (`m/1852H/1815H/NH/1/N`), incrementing with each transaction. Standard
+        HD wallet behaviour.
+
+        **`single_address`**: Change outputs always go to the account's first
+        external address (`m/1852H/1815H/NH/0/0`). No internal-chain keys
+        (`/1/N`) are ever derived or used. This matches hardware wallet behaviour
+        (Ledger, Trezor) where a single address is reused for both receives and
+        change.
+
+        The mode can be toggled freely at any time, including for account 0H.
+        Changing the mode does not move any existing funds.
+      parameters:
+        - $ref: "#/components/parameters/parametersWalletId"
+        - $ref: "#/components/parameters/parametersAccountIndex"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApiSetAccountMode"
+      responses:
+        "200":
+          description: Mode updated. Returns the updated account summary.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiAccount"
+        "400":
+          description: Invalid mode value.
+        "404":
+          description: Wallet not found, or account index not registered for this wallet.
+
+  /wallets/{walletId}/accounts/{accountIndex}/utxo/consolidate:
+    post:
+      operationId: postWalletAccountConsolidate
+      tags: ["Accounts"]
+      summary: Consolidate Account UTXOs to /0/0
+      description: |
+        Construct, sign, and submit a transaction that sweeps all UTXOs
+        belonging to this account into a single output at the account's
+        first external address (`m/1852H/1815H/NH/0/0`).
+
+        **Idempotent when already consolidated**: If the account already has
+        exactly one UTXO located at `/0/0`, no transaction is constructed and
+        the response contains `"complete": true` with no `transaction` field.
+
+        **Partial consolidation**: If UTXOs exceed the maximum transaction
+        size, the largest valid batch is swept in one transaction.
+        The response contains `"complete": false`; call this endpoint again
+        to continue until `"complete": true` is returned.
+
+        The wallet's spending passphrase is required for signing.
+      parameters:
+        - $ref: "#/components/parameters/parametersWalletId"
+        - $ref: "#/components/parameters/parametersAccountIndex"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - passphrase
+              properties:
+                passphrase:
+                  description: The wallet's spending passphrase.
+                  type: string
+                  format: password
+                  example: "Secure Passphrase"
+      responses:
+        "202":
+          description: Consolidation transaction submitted (or no-op if already consolidated).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiConsolidateResponse"
+        "403":
+          description: Incorrect passphrase.
+        "404":
+          description: Wallet not found, or account index not registered for this wallet.
+        "422":
+          description: Account has no UTXOs to consolidate (empty account).
