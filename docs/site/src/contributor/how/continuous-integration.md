@@ -6,17 +6,125 @@ All CI for `cardano-wallet` runs on [GitHub Actions](https://github.com/cardano-
 
 ### Core CI
 
-| Workflow | Trigger | Description |
-|----------|---------|-------------|
-| [`ci.yml`](https://github.com/cardano-foundation/cardano-wallet/actions/workflows/ci.yml) | push, PR | Main build & test pipeline — Linux unit/integration tests, builds all artifacts |
+Core CI is split by **platform** and by **tier**. Every workflow targets one platform, so a
+repository able to serve some platforms and not others still reaches a conclusion on the ones it can
+run. A repository that declares which runners it has (see below) additionally gets the jobs it
+cannot serve reported as **skipped**; one that declares nothing leaves them queued, where they block
+nothing but stay pending until GitHub times them out after 24 hours.
+
+Tiers group jobs by who benefits from their output, which is also what decides whether a given
+repository wants to run them at all:
+
+| Tier | Benefits | Requires |
+|------|----------|----------|
+| Conformance (hosted) | Every collaborator, including one with no hardware at all | Nothing — GitHub-hosted. Carries checks whose subject is the repository, not the runner fleet |
+| Conformance | Every collaborator — it keeps people who never speak writing consistent code | A dev shell |
+| Verification | Whoever changes the code, and anyone pinning a built output | Built derivations; a machine able to host a local cluster |
+| Publication | Only the canonical repository's audience | `ATTIC_TOKEN` and the runners to build artifacts |
+
+| Workflow | Tier | Platform | Runner labels | Trigger |
+|----------|------|----------|---------------|---------|
+| `ci-conformance-hosted.yml` | Conformance | Linux (hosted) | `ubuntu-latest` | push, PR, dispatch |
+| [`ci.yml`](https://github.com/cardano-foundation/cardano-wallet/actions/workflows/ci.yml) | Conformance | Linux | `nix-enabled-runners` | push, PR, dispatch |
+| `ci-conformance-macos.yml` | Conformance | macOS | `self-hosted, macOS, ARM64, cardano-wallet` | push, PR, dispatch |
+| `ci-verification-linux.yml` | Verification | Linux | `nix-enabled-runners` | push, PR, dispatch |
+| `ci-verification-macos.yml` | Verification | macOS | `self-hosted, macOS, ARM64, cardano-wallet` | push, PR, dispatch |
+| `ci-publication-linux.yml` | Publication | Linux | `nix-enabled-runners` | push, PR, dispatch |
+| `ci-publication-macos.yml` | Publication | macOS | `self-hosted, macOS, ARM64, cardano-wallet` | push, PR, dispatch |
+
+`ci.yml` keeps its name as the baseline that should always pass: conformance is the tier relevant to
+any repository holding the source, whatever hardware it has.
+
+A repository that does not publish — a fork, or anyone building from source — can disable
+`ci-publication-*` in **Settings → Actions**. The cache job additionally skips itself when
+`ATTIC_TOKEN` is absent, so it reports as skipped rather than failing.
+
+Disabling publication is not free, though. `docker-boot-sync` boots the built image and checks it
+reaches a syncing state, which is a verification signal rather than a publication one; it sits in
+this tier because it consumes the image `docker` produces, and workflows cannot share jobs. Disable
+the tier and that test goes with it.
+
+### Declaring what your infrastructure has
+
+Two repository variables let a repository say which runners it does **not** have. Every job for that
+runner kind then reports as skipped instead of queueing for a machine that will never arrive.
+
+| Variable | Set it to | Effect |
+|----------|-----------|--------|
+| `HAS_MACOS_RUNNER` | `false` | Every job in the three `*-macos` workflows skips |
+| `HAS_NIX_RUNNER` | `false` | Every job on `nix-enabled-runners` skips — which, today, is every job in the other three workflows |
+
+Only the exact string `false` disables. Anything else, including leaving the variable unset, runs
+the jobs — so this is opt-in and changes nothing for a repository that ignores it.
+
+Set them in **Settings → Secrets and variables → Actions → Variables**, or:
+
+```console
+$ gh variable set HAS_MACOS_RUNNER --body false
+$ gh variable list
+```
+
+Prefer this to disabling a workflow when the reason is *"I do not have that hardware"*. A disabled
+workflow is invisible: nothing on any pull request indicates it exists, so a repository that later
+acquires a runner has nothing to remind it. A skipped job stays in the checks list on every pull
+request until the declaration changes. Disabling is the right mechanism for a tier you do not
+**want**; the variable is the right one for a platform you do not **have**.
+
+Skipped jobs also satisfy branch protection, where a job that never reports leaves a required check
+pending indefinitely.
+
+`HAS_NIX_RUNNER=false` does not leave a repository with nothing. `ci-conformance-hosted.yml` runs on
+GitHub-hosted capacity and carries no guard, so it reports on every pull request in every
+repository. That is what keeps a green verdict meaningful where the nix tiers are declared away —
+something did run, and it was the tier that catches the errors a contributor is most likely to make.
+
+### Failing fast without nix
+
+Every build gate opens with its platform's nix check — `nix --version` on Linux, plus
+`nix flake info` on macOS — before invoking `nix build`. A runner missing nix, or missing it from
+the service PATH, therefore fails at a named step in seconds rather than somewhere inside a
+multi-derivation build.
+
+### Running on partial infrastructure
+
+| You have | Enable | Declare | Expect |
+|----------|--------|---------|--------|
+| Linux runners only | `ci.yml`, `ci-verification-linux.yml` | `HAS_MACOS_RUNNER=false` | Conformance and verification conclude; macOS jobs report as skipped |
+| Linux, and you publish | Add `ci-publication-linux.yml` | — | Requires `ATTIC_TOKEN` for the cache job; other publication jobs run without it |
+| macOS as well | The `*-macos` workflows | — | Requires a runner carrying all four labels above |
+| No self-hosted runners | `ci-conformance-hosted.yml` (always on) | `HAS_NIX_RUNNER=false`, `HAS_MACOS_RUNNER=false` | The hosted conformance checks run and conclude in seconds; everything needing nix skips, and nothing queues |
+
+Three tuning knobs are read from repository variables by `ci-verification-linux.yml`, each
+defaulting to the value used before they were configurable, so leaving them unset changes nothing:
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `INTEGRATION_JOBS` | `6` | `-j` for the integration suite |
+| `TESTS_RETRY_FAILED` | `1` | Retry failed examples once |
+| `LOCAL_CLUSTER_ERA` | `conway` | Era the local cluster starts in |
+
+Lower `INTEGRATION_JOBS` on a machine with few cores. The integration suite runs a single cluster and
+its scenarios race against block production and reward accrual; those races widen under CPU
+contention, so an oversubscribed machine produces failures that look like flakes but are really the
+tests losing a race. The values in use are echoed at the start of the run.
 
 ### Platform-specific
 
-| Workflow | Trigger | Description |
-|----------|---------|-------------|
-| [`windows.yml`](https://github.com/cardano-foundation/cardano-wallet/actions/workflows/windows.yml) | push, dispatch | Windows build & unit tests (self-hosted) |
-| [`macos-unit-tests.yml`](https://github.com/cardano-foundation/cardano-wallet/actions/workflows/macos-unit-tests.yml) | push, dispatch | macOS unit tests (self-hosted Apple Silicon) |
-| [`macos-integration.yml`](https://github.com/cardano-foundation/cardano-wallet/actions/workflows/macos-integration.yml) | dispatch | macOS integration tests (self-hosted) |
+| Workflow | Trigger | Runner labels | Description |
+|----------|---------|---------------|-------------|
+| [`windows.yml`](https://github.com/cardano-foundation/cardano-wallet/actions/workflows/windows.yml) | push, dispatch | `nix-enabled-runners` **and** `windows-2025-vs2026` | Windows build & unit tests |
+| [`macos-unit-tests.yml`](https://github.com/cardano-foundation/cardano-wallet/actions/workflows/macos-unit-tests.yml) | push, dispatch | `self-hosted, macOS, ARM64, cardano-wallet` | macOS unit tests |
+| [`macos-integration.yml`](https://github.com/cardano-foundation/cardano-wallet/actions/workflows/macos-integration.yml) | push, dispatch | `self-hosted, macOS, ARM64, cardano-wallet` | macOS integration tests |
+
+`windows.yml` and `windows-e2e.yml` span two platforms in one workflow: a Linux job cross-compiles
+the binary and a Windows job then runs it. The dependency is structural — the artifact genuinely
+comes from the other platform — so those workflows need both platforms to reach a conclusion, and a
+repository serving only one of them gets no verdict from them. `release.yml` and `verify-release.yml`
+are the same. They are exempted by name in `scripts/ci/check-workflow-platforms.sh`; nothing else may
+acquire that coupling without the check failing.
+
+`windows-2025-vs2026` is not a GitHub-hosted image. It is an organisation-specific runner, so a fork
+cannot serve those jobs at any price without provisioning equivalent hardware.
 
 ### End-to-end
 

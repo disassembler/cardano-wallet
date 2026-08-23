@@ -1,0 +1,62 @@
+name: CI Conformance (macOS)
+
+# Conformance on macOS: nix evaluation. Every collaborator benefits.
+#
+# Split from ci.yml so that a repository able to serve one platform reaches a
+# conclusion regardless of the platforms it cannot serve. Triggers, jobs and
+# commands are unchanged; only the file each job is declared in differs.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-conformance-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Nix eval-cache uses POSIX write locks on ~/.cache/nix/eval-cache-v5/*.sqlite.
+  # All runners share the same OS user, so one evaluating job blocks every other
+  # nix command. Per-job XDG_CACHE_HOME eliminates the contention.
+  XDG_CACHE_HOME: /tmp/nix-eval-cache/${{ github.job }}
+
+jobs:
+
+  # ---------------------------------------------------------------------------
+  # macOS (nix evaluation)
+  # ---------------------------------------------------------------------------
+
+  # No build gate. Both commands are evaluation-only, so gating them on
+  # build-gate-mac would make a version check wait on the heaviest job in the
+  # repository, and would suppress the flake-evaluation diagnostic behind the
+  # build failure it exists to report.
+  #
+  # Unlike its Linux counterpart this job is not redundant with the gates that
+  # now open with the same commands: it is the only macOS job that reports
+  # without building anything, so a repository whose macOS runner is cold, or
+  # which runs no other macOS tier, still learns whether nix works there.
+
+  mac-nix-check:
+    name: "Check Nix (macOS)"
+    if: vars.HAS_MACOS_RUNNER != 'false'
+    runs-on: [self-hosted, macOS, ARM64, cardano-wallet]
+    env:
+      XDG_CACHE_HOME: /Users/gha-runner/.cache/nix-eval-cache/${{ github.job }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Check nix version
+        # A precondition, and informational: each runner's reported version
+        # lands in the run summary, so a fleet that has drifted is visible
+        # without opening a log. Nothing is asserted against it — a staged
+        # runner upgrade is a normal state, not a fault.
+        run: |
+          nix --version
+          echo "- ${{ github.job }} on ${RUNNER_NAME:-unknown}: $(nix --version)" >> "$GITHUB_STEP_SUMMARY"
+      - name: Check flake info
+        run: nix flake --quiet info
+

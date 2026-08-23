@@ -6,7 +6,27 @@ set -euo pipefail
 
 compose_file="run/common/docker/docker-compose.yml"
 run_script="run/common/docker/run.sh"
-workflow_file=".github/workflows/ci.yml"
+# Locate the workflow declaring the job rather than naming a file. The contract
+# is about wherever docker-boot-sync lives, and it has moved once already: these
+# assertions named ci.yml until the workflow was split by platform and tier, at
+# which point all of them broke at once. Deriving the path means the next move
+# costs nothing.
+mapfile -t workflow_files < <(
+    grep -rlE '^[[:space:]]{2}docker-boot-sync:[[:space:]]*$' .github/workflows/ | sort
+)
+
+if [[ "${#workflow_files[@]}" -eq 0 ]]; then
+    echo "No workflow declares a docker-boot-sync job; the cleanup contract has no subject." >&2
+    exit 1
+fi
+
+if [[ "${#workflow_files[@]}" -gt 1 ]]; then
+    echo "More than one workflow declares docker-boot-sync: ${workflow_files[*]}" >&2
+    exit 1
+fi
+
+workflow_file="${workflow_files[0]}"
+echo "Checking the boot-sync cleanup contract against ${workflow_file}."
 
 failed=0
 

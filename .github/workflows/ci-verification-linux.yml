@@ -1,0 +1,358 @@
+name: CI Verification (Linux)
+
+# Verification on Linux: unit, integration, cluster and boot-sync suites.
+#
+# Split from ci.yml so that a repository able to serve one platform reaches a
+# conclusion regardless of the platforms it cannot serve. Triggers, jobs and
+# commands are unchanged; only the file each job is declared in differs.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-verification-linux-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Nix eval-cache uses POSIX write locks on ~/.cache/nix/eval-cache-v5/*.sqlite.
+  # All runners share the same OS user, so one evaluating job blocks every other
+  # nix command. Per-job XDG_CACHE_HOME eliminates the contention.
+  XDG_CACHE_HOME: /tmp/nix-eval-cache/${{ github.job }}
+
+jobs:
+  build-gate:
+    if: vars.HAS_NIX_RUNNER != 'false'
+    name: "Build Gate (Linux)"
+    runs-on: nix-enabled-runners
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Check nix version
+        # A precondition, and informational: each runner's reported version
+        # lands in the run summary, so a fleet that has drifted is visible
+        # without opening a log. Nothing is asserted against it — a staged
+        # runner upgrade is a normal state, not a fault.
+        run: |
+          nix --version
+          echo "- ${{ github.job }} on ${RUNNER_NAME:-unknown}: $(nix --version)" >> "$GITHUB_STEP_SUMMARY"
+      - name: Build test and runtime derivations
+        run: >-
+          nix build --quiet
+          .#cardano-wallet .#cardano-node .#cardano-cli
+          .#local-cluster .#integration-exe .#test-local-cluster-exe
+          .#unit-cardano-wallet-unit .#unit-cardano-numeric
+          .#unit-cardano-wallet-primitive
+          .#unit-cardano-wallet-secrets .#unit-cardano-wallet-test-utils
+          .#unit-cardano-wallet-launcher .#unit-cardano-wallet-network-layer
+          .#unit-cardano-wallet-application-tls .#unit-cardano-wallet-blackbox-benchmarks
+          .#unit-std-gen-seed .#unit-wai-middleware-logging
+          .#unit-benchmark-history
+          .#wallet-key-export .#wallet-key-export-test
+
+
+  # ---------------------------------------------------------------------------
+  # Linux unit tests (needs: build-gate)
+  # ---------------------------------------------------------------------------
+
+  unit-tests:
+    if: vars.HAS_NIX_RUNNER != 'false'
+    name: ${{ matrix.name }}
+    needs: build-gate
+    runs-on: nix-enabled-runners
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: "cardano-wallet-application-tls"
+            working-directory: lib/application-tls
+            command: nix run --quiet ../../.#unit-cardano-wallet-application-tls -- +RTS -M2G -s -RTS
+
+          - name: "cardano-numeric"
+            command: nix run --quiet .#unit-cardano-numeric -- +RTS -M2G -s -RTS
+
+          - name: "cardano-wallet-blackbox-benchmarks"
+            working-directory: lib/wallet-benchmarks
+            command: nix run --quiet ../../.#unit-cardano-wallet-blackbox-benchmarks -- +RTS -M2G -s -RTS
+
+          - name: "cardano-wallet-launcher"
+            command: nix run --quiet .#unit-cardano-wallet-launcher -- +RTS -M2G -s -RTS
+
+          - name: "cardano-wallet-network-layer"
+            command: nix run --quiet .#unit-cardano-wallet-network-layer -- +RTS -M2G -s -RTS
+
+          - name: "cardano-wallet-primitive"
+            working-directory: lib/primitive
+            command: nix run --quiet ../../.#unit-cardano-wallet-primitive -- +RTS -M2G -s -RTS
+
+          - name: "cardano-wallet-secrets"
+            command: nix run --quiet .#unit-cardano-wallet-secrets -- +RTS -M2G -s -RTS
+
+          - name: "cardano-wallet-test-utils"
+            command: nix run --quiet .#unit-cardano-wallet-test-utils -- +RTS -M2G -s -RTS
+
+          - name: "std-gen-seed"
+            command: nix run --quiet .#unit-std-gen-seed -- +RTS -M2G -s -RTS
+
+          - name: "wai-middleware-logging"
+            command: nix run --quiet .#unit-wai-middleware-logging -- +RTS -M2G -s -RTS
+
+          - name: "benchmark-history-test"
+            command: nix run --quiet .#unit-benchmark-history -- +RTS -M2G -s -RTS
+
+          - name: "wallet-key-export-test"
+            command: >-
+              nix shell --quiet .#wallet-key-export -c
+              nix run --quiet .#wallet-key-export-test -- +RTS -M2G -s -RTS
+
+          - name: "wallet-unit / Byron + CLI"
+            working-directory: lib/unit
+            command: >-
+              nix shell --quiet ../../.#cardano-cli ../../.#cardano-node -c
+              nix run --quiet ../../.#unit-cardano-wallet-unit --
+              --fail-on=empty
+              --match "/Cardano.Byron"
+              --match "/Cardano.CLI"
+              -j1 +RTS -M2G -s -RTS
+
+          - name: "wallet-unit / DB.Sqlite + Pool"
+            working-directory: lib/unit
+            command: >-
+              nix shell --quiet ../../.#cardano-cli ../../.#cardano-node -c
+              nix run --quiet ../../.#unit-cardano-wallet-unit --
+              --fail-on=empty
+              --match "/Cardano.DB"
+              --match "/Cardano.Pool"
+              -j1 +RTS -M2G -s -RTS
+
+          - name: "wallet-unit / Address"
+            working-directory: lib/unit
+            command: >-
+              nix shell --quiet ../../.#cardano-cli ../../.#cardano-node -c
+              nix run --quiet ../../.#unit-cardano-wallet-unit --
+              --fail-on=empty
+              --match "/Cardano.Wallet.Address"
+              -j1 +RTS -M2G -s -RTS
+
+          - name: "wallet-unit / Api"
+            working-directory: lib/unit
+            command: >-
+              nix shell --quiet ../../.#cardano-cli ../../.#cardano-node -c
+              nix run --quiet ../../.#unit-cardano-wallet-unit --
+              --fail-on=empty
+              --match "/Cardano.Wallet.Api"
+              -j1 +RTS -M2G -s -RTS
+
+          - name: "wallet-unit / Balance"
+            working-directory: lib/unit
+            command: >-
+              nix shell --quiet ../../.#cardano-cli ../../.#cardano-node -c
+              nix run --quiet ../../.#unit-cardano-wallet-unit --
+              --fail-on=empty
+              --match "/Cardano.Wallet.Balance"
+              -j1 +RTS -M2G -s -RTS
+
+          - name: "wallet-unit / DB"
+            working-directory: lib/unit
+            command: >-
+              nix shell --quiet ../../.#cardano-cli ../../.#cardano-node -c
+              nix run --quiet ../../.#unit-cardano-wallet-unit --
+              --fail-on=empty
+              --match "/Cardano.Wallet.DB"
+              -j1 +RTS -M2G -s -RTS
+
+          - name: "wallet-unit / Primitive"
+            working-directory: lib/unit
+            command: >-
+              nix shell --quiet ../../.#cardano-cli ../../.#cardano-node -c
+              nix run --quiet ../../.#unit-cardano-wallet-unit --
+              --fail-on=empty
+              --match "/Cardano.Wallet.Primitive"
+              -j1 +RTS -M2G -s -RTS
+
+          - name: "wallet-unit / Shelley"
+            working-directory: lib/unit
+            command: >-
+              nix shell --quiet ../../.#cardano-cli ../../.#cardano-node -c
+              nix run --quiet ../../.#unit-cardano-wallet-unit --
+              --fail-on=empty
+              --match "/Cardano.Wallet.Shelley"
+              -j1 +RTS -M2G -s -RTS
+
+          - name: "wallet-unit / Other Wallet"
+            working-directory: lib/unit
+            command: >-
+              nix shell --quiet ../../.#cardano-cli ../../.#cardano-node -c
+              nix run --quiet ../../.#unit-cardano-wallet-unit --
+              --fail-on=empty
+              --match "/Cardano.Wallet"
+              --skip "/Cardano.Wallet.Address"
+              --skip "/Cardano.Wallet.Api"
+              --skip "/Cardano.Wallet.Balance"
+              --skip "/Cardano.Wallet.DB"
+              --skip "/Cardano.Wallet.Primitive"
+              --skip "/Cardano.Wallet.Shelley"
+              -j1 +RTS -M2G -s -RTS
+
+          - name: "wallet-unit / Control + Data"
+            working-directory: lib/unit
+            command: >-
+              nix shell --quiet ../../.#cardano-cli ../../.#cardano-node -c
+              nix run --quiet ../../.#unit-cardano-wallet-unit --
+              --fail-on=empty
+              --match "/Control"
+              --match "/Data"
+              -j1 +RTS -M2G -s -RTS
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Run tests
+        working-directory: ${{ matrix.working-directory || '.' }}
+        run: ${{ matrix.command }}
+
+
+  # ---------------------------------------------------------------------------
+  # Integration tests (needs: build-gate)
+  # ---------------------------------------------------------------------------
+
+  integration:
+    if: vars.HAS_NIX_RUNNER != 'false'
+    name: "Conway Integration Tests"
+    needs: build-gate
+    runs-on: nix-enabled-runners
+    timeout-minutes: 120
+    env:
+      LOCAL_CLUSTER_CONFIGS: lib/local-cluster/test/data/cluster-configs
+      CARDANO_WALLET_TEST_DATA: lib/integration/test/data
+      # Tunable without editing this file, by setting repository variables of
+      # the same name. Unset means the value used before this was configurable,
+      # so the default path is unchanged. The suite runs one cluster and races
+      # against block production; those races widen under CPU contention, so a
+      # machine with few cores wants lower concurrency.
+      LOCAL_CLUSTER_ERA: ${{ vars.LOCAL_CLUSTER_ERA || 'conway' }}
+      TESTS_RETRY_FAILED: ${{ vars.TESTS_RETRY_FAILED || '1' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Run integration tests
+        # Scope test-cluster temp dirs to the job-private RUNNER_TEMP
+        # (auto-cleaned by the runner between jobs). Shared /tmp on the build
+        # host is a tmpfs visible to every sibling runner, so a sibling's
+        # cleanup glob would unlink VolatileDB files of a live cluster.
+        env:
+          TMPDIR: ${{ runner.temp }}
+          INTEGRATION_JOBS: ${{ vars.INTEGRATION_JOBS || '6' }}
+        run: |
+          mkdir -p integration-test-dir/cluster.logs
+          export CLUSTER_LOGS_DIR_PATH=integration-test-dir/cluster.logs
+          export INTEGRATION_TEST_DIR=integration-test-dir
+          echo "era=$LOCAL_CLUSTER_ERA retry=$TESTS_RETRY_FAILED jobs=$INTEGRATION_JOBS"
+          nix shell --quiet .#cardano-node .#cardano-cli -c \
+            nix shell --quiet .#cardano-wallet .#local-cluster .#integration-exe \
+              -c integration-exe -j"$INTEGRATION_JOBS"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: integration-test-logs
+          path: integration-test-dir/
+
+
+  # ---------------------------------------------------------------------------
+  # Local cluster tests (needs: build-gate)
+  # ---------------------------------------------------------------------------
+
+  local-cluster:
+    if: vars.HAS_NIX_RUNNER != 'false'
+    name: "Local Cluster Tests"
+    needs: build-gate
+    runs-on: nix-enabled-runners
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Run tests
+        env:
+          LOCAL_CLUSTER_CONFIGS: lib/local-cluster/test/data/cluster-configs
+          CLUSTER_LOGS_DIR_PATH: local-cluster-logs
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          mkdir -p local-cluster-logs
+          nix shell --quiet .#local-cluster .#test-local-cluster-exe .#cardano-cli .#cardano-node .#cardano-wallet \
+            -c test-local-cluster-exe
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: local-cluster-logs
+          path: local-cluster-logs/
+
+
+  # ---------------------------------------------------------------------------
+  # Boot syncs (needs: build-gate)
+  # ---------------------------------------------------------------------------
+
+  boot-syncs:
+    if: vars.HAS_NIX_RUNNER != 'false'
+    name: "${{ matrix.name }}"
+    needs: build-gate
+    runs-on: nix-enabled-runners
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: "Preview Network Boot Sync"
+            dir: run/preview/nix
+            timeout: 600
+            status: syncing
+            network: testnet
+
+          - name: "Mainnet Boot Sync"
+            dir: run/mainnet/nix
+            timeout: 600
+            status: syncing
+            network: mainnet
+
+    env:
+      SUCCESS_STATUS: ${{ matrix.status }}
+      NODE_LOGS_FILE: ./logs/node.log
+      WALLET_LOGS_FILE: ./logs/wallet.log
+      CLEANUP_DB: "true"
+      NETWORK: ${{ matrix.network }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Run boot sync
+        working-directory: ${{ matrix.dir }}
+        run: |
+          rm -rf logs databases
+          mkdir -p logs
+          ./run.sh sync ${{ matrix.timeout }}
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: boot-sync-logs-${{ strategy.job-index }}
+          path: ${{ matrix.dir }}/logs/
+

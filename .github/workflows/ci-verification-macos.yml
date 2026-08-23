@@ -1,0 +1,98 @@
+name: CI Verification (macOS)
+
+# Verification on macOS: the local-cluster suite.
+#
+# Split from ci.yml so that a repository able to serve one platform reaches a
+# conclusion regardless of the platforms it cannot serve. Triggers, jobs and
+# commands are unchanged; only the file each job is declared in differs.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-verification-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Nix eval-cache uses POSIX write locks on ~/.cache/nix/eval-cache-v5/*.sqlite.
+  # All runners share the same OS user, so one evaluating job blocks every other
+  # nix command. Per-job XDG_CACHE_HOME eliminates the contention.
+  XDG_CACHE_HOME: /tmp/nix-eval-cache/${{ github.job }}
+
+jobs:
+
+  # ---------------------------------------------------------------------------
+  # macOS (build gate + artifacts)
+  # ---------------------------------------------------------------------------
+
+  build-gate-mac:
+    name: "Build Gate (macOS)"
+    if: vars.HAS_MACOS_RUNNER != 'false'
+    runs-on: [self-hosted, macOS, ARM64, cardano-wallet]
+    env:
+      XDG_CACHE_HOME: /Users/gha-runner/.cache/nix-eval-cache/${{ github.job }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Check nix version
+        # A precondition, and informational: each runner's reported version
+        # lands in the run summary, so a fleet that has drifted is visible
+        # without opening a log. Nothing is asserted against it — a staged
+        # runner upgrade is a normal state, not a fault.
+        run: |
+          nix --version
+          echo "- ${{ github.job }} on ${RUNNER_NAME:-unknown}: $(nix --version)" >> "$GITHUB_STEP_SUMMARY"
+      - name: Check flake info
+        run: nix flake --quiet info
+      - name: Build all macOS derivations
+        run: >-
+          nix build --quiet
+          .#unit-cardano-wallet-unit .#unit-cardano-numeric
+          .#unit-cardano-wallet-primitive
+          .#unit-cardano-wallet-secrets .#unit-cardano-wallet-test-utils
+          .#unit-cardano-wallet-launcher .#unit-cardano-wallet-network-layer
+          .#unit-cardano-wallet-application-tls .#unit-cardano-wallet-blackbox-benchmarks
+          .#unit-std-gen-seed .#unit-wai-middleware-logging
+          .#unit-benchmark-history
+          .#cardano-cli .#cardano-node .#cardano-wallet
+          .#local-cluster .#test-local-cluster-exe
+          .#packages.x86_64-darwin.ci.artifacts.macos-intel.release
+          .#packages.aarch64-darwin.ci.artifacts.macos-silicon.release
+          .#packages.aarch64-darwin.integration-exe
+
+
+  mac-local-cluster:
+    name: "Local Cluster Tests (macOS)"
+    needs: build-gate-mac
+    if: vars.HAS_MACOS_RUNNER != 'false'
+    runs-on: [self-hosted, macOS, ARM64, cardano-wallet]
+    env:
+      XDG_CACHE_HOME: /Users/gha-runner/.cache/nix-eval-cache/${{ github.job }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Run tests
+        env:
+          LOCAL_CLUSTER_CONFIGS: lib/local-cluster/test/data/cluster-configs
+          CLUSTER_LOGS_DIR_PATH: local-cluster-logs
+        run: |
+          mkdir -p local-cluster-logs
+          nix shell --quiet .#local-cluster .#test-local-cluster-exe .#cardano-cli .#cardano-node .#cardano-wallet \
+            -c test-local-cluster-exe
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-local-cluster-logs
+          path: local-cluster-logs/
+

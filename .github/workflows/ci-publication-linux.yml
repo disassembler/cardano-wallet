@@ -1,0 +1,295 @@
+name: CI Publication (Linux)
+
+# Publication on Linux: installers, images and cache population. Only the canonical repository's audience benefits; a fork gains nothing by running this.
+#
+# Split from ci.yml so that a repository able to serve one platform reaches a
+# conclusion regardless of the platforms it cannot serve. Triggers, jobs and
+# commands are unchanged; only the file each job is declared in differs.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-publication-linux-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Nix eval-cache uses POSIX write locks on ~/.cache/nix/eval-cache-v5/*.sqlite.
+  # All runners share the same OS user, so one evaluating job blocks every other
+  # nix command. Per-job XDG_CACHE_HOME eliminates the contention.
+  XDG_CACHE_HOME: /tmp/nix-eval-cache/${{ github.job }}
+
+jobs:
+
+  build-gate-artifacts:
+    if: vars.HAS_NIX_RUNNER != 'false'
+    name: "Build Gate (Linux Artifacts)"
+    runs-on: nix-enabled-runners
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Check nix version
+        # A precondition, and informational: each runner's reported version
+        # lands in the run summary, so a fleet that has drifted is visible
+        # without opening a log. Nothing is asserted against it — a staged
+        # runner upgrade is a normal state, not a fault.
+        run: |
+          nix --version
+          echo "- ${{ github.job }} on ${RUNNER_NAME:-unknown}: $(nix --version)" >> "$GITHUB_STEP_SUMMARY"
+      - name: Build release artifacts (musl static)
+        run: >-
+          nix build --quiet
+          .#ci.artifacts.linux64.release .#dockerTestImage
+          .#ci.artifacts.wallet-key-export-static
+
+
+
+  build-gate-windows:
+    if: vars.HAS_NIX_RUNNER != 'false'
+    name: "Build Gate (Windows)"
+    runs-on: nix-enabled-runners
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Check nix version
+        # A precondition, and informational: each runner's reported version
+        # lands in the run summary, so a fleet that has drifted is visible
+        # without opening a log. Nothing is asserted against it — a staged
+        # runner upgrade is a normal state, not a fault.
+        run: |
+          nix --version
+          echo "- ${{ github.job }} on ${RUNNER_NAME:-unknown}: $(nix --version)" >> "$GITHUB_STEP_SUMMARY"
+      - name: Build Windows cross-compiled artifacts
+        run: >-
+          nix build --quiet
+          .#ci.artifacts.win64.release
+          .#ci.artifacts.win64.tests.wallet-unit
+          .#ci.artifacts.win64.tests.wallet-primitive
+          .#ci.artifacts.win64.tests.wallet-secrets
+          .#ci.artifacts.win64.tests.wallet-network-layer
+          .#ci.artifacts.win64.tests.wallet-test-utils
+          .#ci.artifacts.win64.tests.wallet-launcher
+          .#ci.artifacts.win64.tests.cardano-numeric
+          .#ci.artifacts.win64.tests.wallet-blackbox-benchmarks
+          .#ci.artifacts.win64.tests.std-gen-seed
+          .#ci.artifacts.win64.tests.wai-middleware-logging
+          .#ci.artifacts.win64.integration
+
+
+  # ---------------------------------------------------------------------------
+  # Linux artifacts (needs: build-gate-artifacts)
+  # ---------------------------------------------------------------------------
+
+  artifacts-package:
+    if: vars.HAS_NIX_RUNNER != 'false'
+    name: "Build Linux Package"
+    needs: build-gate-artifacts
+    runs-on: nix-enabled-runners
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Build release package
+        run: |
+          rm -rf ./result/*
+          nix build --quiet -o result/linux .#ci.artifacts.linux64.release
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-release-package
+          path: result/linux/
+
+
+  artifacts-wallet-key-export:
+    if: vars.HAS_NIX_RUNNER != 'false'
+    name: "Build wallet-key-export (static)"
+    needs: build-gate-artifacts
+    runs-on: nix-enabled-runners
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Build static binary
+        run: |
+          rm -rf ./result/*
+          nix build --quiet -o result/wallet-key-export .#ci.artifacts.wallet-key-export-static
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: wallet-key-export-linux-static
+          path: result/wallet-key-export/bin/wallet-key-export
+
+
+  artifacts-shell:
+    if: vars.HAS_NIX_RUNNER != 'false'
+    name: "Evaluate Linux Shell"
+    needs: build-gate-artifacts
+    runs-on: nix-enabled-runners
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Evaluate shell
+        run: nix shell --quiet .#cardano-node .#cardano-cli .#cardano-wallet --command cardano-wallet version
+
+
+  # ---------------------------------------------------------------------------
+  # Docker (needs: build-gate-artifacts)
+  # ---------------------------------------------------------------------------
+
+  docker:
+    if: vars.HAS_NIX_RUNNER != 'false'
+    name: "Docker Image"
+    needs: build-gate-artifacts
+    runs-on: nix-enabled-runners
+    outputs:
+      image-tag: ${{ steps.build.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Build and load image
+        id: build
+        run: |
+          mkdir -p artifacts
+          nix build --quiet .#dockerTestImage -o artifacts/docker-image.tgz
+          output=$(docker load < artifacts/docker-image.tgz)
+          tag=$(echo "$output" | sed -n 's/Loaded image: cardanofoundation\/cardano-wallet:\(.*\)/\1/p')
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Docker image tag: $tag"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: docker-image
+          path: artifacts/docker-image.tgz
+
+
+  docker-boot-sync:
+    if: vars.HAS_NIX_RUNNER != 'false'
+    name: "${{ matrix.name }}"
+    needs: docker
+    runs-on: nix-enabled-runners
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: "Docker Mainnet Boot Sync"
+            dir: run/mainnet/docker
+            timeout: 600
+            status: syncing
+
+          - name: "Docker Preview Boot Sync"
+            dir: run/preview/docker
+            timeout: 600
+            status: syncing
+
+    timeout-minutes: 30
+    env:
+      WALLET_TAG: ${{ needs.docker.outputs.image-tag }}
+      USE_LOCAL_IMAGE: "true"
+      DOCKER_RESTART_POLICY: "no"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      # Per-pod docker daemons on the ARC fleet don't share the image the
+      # `docker` job built; load it from its artifact (builder-new shared one daemon).
+      - name: Download image
+        uses: actions/download-artifact@v7
+        with:
+          name: docker-image
+          path: artifacts
+
+      - name: Load image
+        run: docker load < artifacts/docker-image.tgz
+
+      - name: Run boot sync
+        working-directory: ${{ matrix.dir }}
+        env:
+          SUCCESS_STATUS: ${{ matrix.status }}
+          COMPOSE_PROJECT_NAME: gha-${{ github.run_id }}-${{ strategy.job-index }}
+          BOOT_SYNC_DIR: ${{ runner.temp }}/cardano-wallet/${{ github.run_id }}-${{ strategy.job-index }}
+          NODE_DB: ${{ runner.temp }}/cardano-wallet/${{ github.run_id }}-${{ strategy.job-index }}/node-db
+          WALLET_DB: ${{ runner.temp }}/cardano-wallet/${{ github.run_id }}-${{ strategy.job-index }}/wallet-db
+          NODE_SOCKET_DIR: ${{ runner.temp }}/cardano-wallet/${{ github.run_id }}-${{ strategy.job-index }}/ipc
+        run: |
+          rm -rf "$BOOT_SYNC_DIR"
+          mkdir -p "$NODE_DB" "$WALLET_DB" "$NODE_SOCKET_DIR"
+          ./run.sh sync ${{ matrix.timeout }}
+
+      - name: Cleanup boot sync
+        if: always()
+        working-directory: ${{ matrix.dir }}
+        env:
+          COMPOSE_PROJECT_NAME: gha-${{ github.run_id }}-${{ strategy.job-index }}
+          BOOT_SYNC_DIR: ${{ runner.temp }}/cardano-wallet/${{ github.run_id }}-${{ strategy.job-index }}
+        run: |
+          docker compose -p "$COMPOSE_PROJECT_NAME" down --remove-orphans --timeout 10 || true
+          docker compose -p "$COMPOSE_PROJECT_NAME" rm -sf || true
+          rm -rf "$BOOT_SYNC_DIR"
+
+
+  # The secrets context is available in neither a job-level nor a step-level
+  # `if:`, so the presence of ATTIC_TOKEN is mapped to an output here and tested
+  # through `needs` below, which a job-level `if:` can read. The token itself is
+  # never emitted: `${VAR:+true}` substitutes the literal `true`, not the value.
+  attic-token:
+    if: vars.HAS_NIX_RUNNER != 'false'
+    name: "Attic Token Present"
+    runs-on: nix-enabled-runners
+    timeout-minutes: 5
+    outputs:
+      present: ${{ steps.probe.outputs.present }}
+    steps:
+      - name: Probe
+        id: probe
+        env:
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
+        run: echo "present=${ATTIC_TOKEN:+true}" >> "$GITHUB_OUTPUT"
+
+  attic-cache:
+    name: "Attic Cache"
+    needs: [attic-token, build-gate-artifacts, build-gate-windows]
+    runs-on: nix-enabled-runners
+    timeout-minutes: 180
+    # A repository without ATTIC_TOKEN cannot push, so the job would only fail;
+    # skip it there. The head-repo condition additionally excludes pull requests
+    # opened from another repository, whose runs never carry secrets.
+    if: >-
+      vars.HAS_NIX_RUNNER != 'false'
+      && needs.attic-token.outputs.present == 'true'
+      && ((github.event_name == 'pull_request'
+       && github.event.pull_request.head.repo.full_name == github.repository)
+      || (github.event_name == 'push' && github.ref == 'refs/heads/master'))
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      # Previously supplied by `needs: build-gate-quality`, which now lives in
+      # ci.yml. A workflow cannot depend on a job in another file, so the same
+      # build runs here; on a runner with a persistent store it is a no-op.
+      - name: Build dev shell
+        run: nix build --quiet .#devShells.x86_64-linux.default.inputDerivation
+
+      - name: Push derivations to Attic
+        env:
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
+          system: x86_64-linux
+        run: nix develop --quiet path:./scripts/ci -c ./scripts/ci/attic-cache.sh
+

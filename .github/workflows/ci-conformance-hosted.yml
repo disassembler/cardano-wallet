@@ -1,0 +1,85 @@
+name: CI Conformance (Hosted)
+
+# Conformance checks that need neither nix nor a self-hosted runner.
+#
+# This is the floor: GitHub-hosted capacity is available to every repository
+# holding the source, so these checks reach a conclusion regardless of what
+# hardware the repository owns. A fork with no self-hosted runners still gets a
+# real verdict, and a required status check pointing here can never hang
+# waiting for a machine that does not exist.
+#
+# Membership rule, both halves required: a check belongs here if it invokes no
+# nix command, and if its subject is the repository as any contributor sees it
+# rather than an invariant of the self-hosted fleet. The second half is not
+# redundant. check-docker-boot-sync-cleanup.sh satisfies the first — it only
+# greps — but guards teardown that matters solely because those runners persist
+# between jobs, holding container names, ports and disk from whatever is
+# scheduled next. It stays with the machine whose resources it protects.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-conformance-hosted-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+
+  checks:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: "Check Local Cabal Test Targets (hosted)"
+            command: scripts/ci/check-local-test-targets.sh
+
+          - name: "Test PR Body Closing Link (hosted)"
+            command: scripts/ci/test-pr-body-closing-link.sh
+
+          # Reads the event payload rather than the repository, and exits 0 on
+          # any event that is not a pull request, so it is safe on push too.
+          - name: "Validate PR Body Closing Link (hosted)"
+            command: scripts/ci/check-pr-body-closing-link.sh
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # Each script resolves its paths relative to the repository root and needs
+      # only coreutils and jq, both on the runner image. No full history is
+      # required, so the checkout stays shallow.
+      - name: Run check
+        run: ${{ matrix.command }}
+
+
+  shellcheck:
+    name: "Lint Bash Scripts (hosted)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # scripts/shellcheck.sh declares `#! /usr/bin/env nix-shell` and asks that
+      # shell for shellcheck, figlet and lolcat. Invoking it through bash below
+      # bypasses the shebang, so those three must already be present. shellcheck
+      # is on the runner image; figlet and lolcat are not. They are reached only
+      # on the success path, but the script does not set -e, so the exit status
+      # of that final pipeline becomes the script's — without them the check
+      # would fail precisely when it passes.
+      - name: Install success-path dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends figlet lolcat
+
+      - name: Run check
+        run: bash scripts/shellcheck.sh
