@@ -200,12 +200,10 @@ import Cardano.Read.Ledger.Tx.CBOR
 import Cardano.Wallet
     ( BuiltTx (..)
     , DelegationFee (feePercentiles)
-    , ErrAddAccount (..)
     , ErrConstructSharedWallet (..)
     , ErrConstructTx (..)
     , ErrCreateMigrationPlan (..)
     , ErrDecodeTx (..)
-    , ErrDeleteAccount (..)
     , ErrGetAccount (..)
     , ErrGetPolicyId (..)
     , ErrMkTransaction (..)
@@ -1100,9 +1098,7 @@ getWalletAccount
     :: forall ctx s n k
      . ( ctx ~ ApiLayer s
        , s ~ SeqState n k
-       , Seq.SupportsDiscovery n k
        , Excluding '[ByronKey, SharedKey] k
-       , WalletFlavor s
        )
     => ctx
     -> ApiT WalletId
@@ -1167,7 +1163,6 @@ getWalletAccountUtxoStatistics
        , s ~ SeqState n k
        , Seq.SupportsDiscovery n k
        , Excluding '[ByronKey, SharedKey] k
-       , WalletFlavor s
        )
     => ctx
     -> ApiT WalletId
@@ -1192,9 +1187,7 @@ listWalletAccountsH
     :: forall ctx s n k
      . ( ctx ~ ApiLayer s
        , s ~ SeqState n k
-       , Seq.SupportsDiscovery n k
        , Excluding '[ByronKey, SharedKey] k
-       , WalletFlavor s
        )
     => ctx
     -> ApiT WalletId

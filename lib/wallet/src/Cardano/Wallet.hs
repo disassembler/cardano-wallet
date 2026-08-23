@@ -128,7 +128,7 @@ module Cardano.Wallet
     , readAccountUTxO
     , listAccountUtxoStatistics
     , listAccountAddresses
-    , AccountSummary
+    , AccountSummary (..)
     , ErrAddAccount (..)
     , ErrDeleteAccount (..)
     , ErrGetAccount (..)
@@ -5037,13 +5037,13 @@ addWalletAccount ctx accountIx pwd =
                 policyXPub <- lift $ liftRawKey kF . toRawXPub <$> deriveKey policyPath
                 let seqState :: SeqState n k
                     seqState =
-                        (mkSeqStateFromAccountXPub @n
+                        mkSeqStateFromAccountXPub @n
                             accountXPub
                             (Just policyXPub)
                             purposeCIP1852
                             defaultAddressPoolGap
-                            IncreasingChangeAddresses)
-                        { derivationPrefix = DerivationPrefix (purposeCIP1852, coinTypeAda, accountIx) }
+                            IncreasingChangeAddresses
+                        & #derivationPrefix .~ DerivationPrefix (purposeCIP1852, coinTypeAda, accountIx)
                 lift
                     $ onWalletState ctx
                     $ update

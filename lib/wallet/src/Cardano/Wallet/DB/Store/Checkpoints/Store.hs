@@ -578,7 +578,6 @@ loadPrologueForAccount
        , SoftDerivation key
        , NetworkDiscriminantCheck key
        , HasSNetworkId n
-       , (key == SharedKey) ~ 'False
        )
     => W.WalletId
     -> Word32

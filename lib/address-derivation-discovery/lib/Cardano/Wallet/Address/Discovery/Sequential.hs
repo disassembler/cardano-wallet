@@ -586,11 +586,10 @@ instance
                     case changeAddressMode st of
                         SingleChangeAddress ->
                             (ixMin, updatePending (pendingChangeIxs st))
-                        IncreasingChangeAddresses ->
+                        _ ->
                             nextChangeIndex
                                 (getPool $ internalPool st)
                                 (pendingChangeIxs st)
-                        SingleExternalAddress -> error "unreachable"
                 addrXPub =
                     deriveAddressPublicKey (accountXPub st) UtxoInternal ix
                 addr = mkAddress addrXPub (rewardAccountKey st)

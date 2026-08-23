@@ -148,6 +148,10 @@ withBootDBLayer timeInterpreter wid params k = do
 
               getSchemaVersion =
                 error "getSchemaVersion not tested in State Machine tests"
+            , listSeqAccounts =
+                error "listSeqAccounts not tested in State Machine tests"
+            , readSeqStateForAccount =
+                error "readSeqStateForAccount not tested in State Machine tests"
             , atomically = \action -> withMVar lock $ \() -> action
             }
 
