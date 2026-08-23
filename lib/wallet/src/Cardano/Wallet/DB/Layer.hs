@@ -113,6 +113,7 @@ import Cardano.Wallet.DB.Sqlite.Migration.Old
 import Cardano.Wallet.DB.Sqlite.Schema
     ( CBOR (..)
     , EntityField (..)
+    , SeqState (..)
     , TxMeta (..)
     , Wallet (..)
     , migrateAll
@@ -770,12 +771,22 @@ mkDBLayerCollection ti wid atomically_ walletState =
         , rollbackTo_
         , atomically_
         , transactionsStore_
+        , listSeqAccounts_
+        , readSeqStateForAccount_
         }
   where
     transactionsQS = newQueryStoreTxWalletsHistory
 
     transactionsStore_ = transactionsQS
     getSchemaVersion_ = getSchemaVersion'
+
+    listSeqAccounts_ :: SqlPersistT IO [Word32]
+    listSeqAccounts_ =
+        fmap (seqStateAccountIndex . entityVal)
+            <$> selectList [SeqStateWalletId ==. wid] [Asc SeqStateAccountIndex]
+
+    readSeqStateForAccount_ :: Word32 -> SqlPersistT IO (Maybe s)
+    readSeqStateForAccount_ = loadExtraAccountState wid
 
     readCheckpoint
         :: SqlPersistT IO (W.Wallet s)

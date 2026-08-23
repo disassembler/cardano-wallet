@@ -24,6 +24,8 @@ module Cardano.Wallet.DB.Store.Checkpoints.Store
     ( PersistAddressBook (..)
     , blockHeaderFromEntity
     , mkStoreCheckpoints
+    , insertPrologueForAccount
+    , loadPrologueForAccount
     )
 where
 
@@ -184,7 +186,8 @@ import Data.Typeable
     ( Typeable
     )
 import Data.Word
-    ( Word64
+    ( Word32
+    , Word64
     )
 import Database.Persist.Sql
     ( Entity (..)
@@ -442,6 +445,30 @@ class AddressBookIso s => PersistAddressBook s where
     loadDiscoveries
         :: W.WalletId -> W.SlotNo -> SqlPersistT IO (Discoveries s)
 
+    -- | Insert (or replace) the prologue for an additional hardened account.
+    -- Default: no-op (only meaningful for sequential-scheme wallets).
+    insertExtraPrologue
+        :: W.WalletId -> Word32 -> Prologue s -> SqlPersistT IO ()
+    insertExtraPrologue _ _ _ = pure ()
+
+    -- | Delete all stored state for the given account index.
+    -- Default: no-op (only meaningful for sequential-scheme wallets).
+    deleteExtraPrologue
+        :: W.WalletId -> Word32 -> SqlPersistT IO ()
+    deleteExtraPrologue _ _ = pure ()
+
+    -- | List all account indices persisted for this wallet.
+    -- Default: [0] (single account).
+    listPrologueAccounts
+        :: W.WalletId -> SqlPersistT IO [Word32]
+    listPrologueAccounts _ = pure [0]
+
+    -- | Load the address-discovery state for an additional hardened account.
+    -- Default: Nothing (not applicable for non-sequential wallets).
+    loadExtraAccountState
+        :: W.WalletId -> Word32 -> SqlPersistT IO (Maybe s)
+    loadExtraAccountState _ _ = pure Nothing
+
 {-------------------------------------------------------------------------------
     Sequential address book storage
 -------------------------------------------------------------------------------}
@@ -473,73 +500,141 @@ instance
     )
     => PersistAddressBook (Seq.SeqState n key)
     where
-    insertPrologue wid (SeqPrologue st) = do
-        repsert (SeqStateKey wid)
-            $ SeqState
-                { seqStateWalletId = wid
-                , seqStateExternalGap = Seq.getGap $ Seq.externalPool st
-                , seqStateInternalGap = Seq.getGap $ Seq.internalPool st
-                , seqStateAccountXPub = serializeXPub $ Seq.accountXPub st
-                , seqStatePolicyXPub = serializeXPub <$> Seq.policyXPub st
-                , seqStateRewardXPub = serializeXPub $ Seq.rewardAccountKey st
-                , seqStateDerivationPrefix = Seq.derivationPrefix st
-                , seqStateChangeAddrMode = Seq.changeAddressMode st
-                }
-        deleteWhere [SeqStatePendingWalletId ==. wid]
-        dbChunked
-            insertMany_
-            (mkSeqStatePendingIxs wid $ Seq.pendingChangeIxs st)
+    insertPrologue wid (SeqPrologue st) =
+        insertPrologueForAccount wid 0 st
 
     insertDiscoveries wid sl (SeqDiscoveries ints exts) = do
-        insertSeqAddressMap @n wid sl ints
-        insertSeqAddressMap @n wid sl exts
+        insertSeqAddressMap @n wid 0 sl ints
+        insertSeqAddressMap @n wid 0 sl exts
 
-    loadPrologue wid = runMaybeT $ do
-        st <- MaybeT $ selectFirst [SeqStateWalletId ==. wid] []
-        let SeqState
-                _
-                eGap
-                iGap
-                accountBytes
-                policyBytes
-                rewardBytes
-                prefix
-                changeAddrMode =
-                    entityVal st
-        let accountXPub = unsafeDeserializeXPub accountBytes
-        let rewardXPub = unsafeDeserializeXPub rewardBytes
-        let policyXPub = unsafeDeserializeXPub <$> policyBytes
-        let intPool = Seq.newSeqAddressPool @n accountXPub iGap
-        let extPool = Seq.newSeqAddressPool @n accountXPub eGap
-        pendingChangeIxs <- lift $ selectSeqStatePendingIxs wid
-        pure
-            $ SeqPrologue
-            $ Seq.SeqState
-                intPool
-                extPool
-                pendingChangeIxs
-                accountXPub
-                policyXPub
-                rewardXPub
-                prefix
-                changeAddrMode
+    loadPrologue wid = fmap SeqPrologue <$> loadPrologueForAccount @n wid 0
 
-    loadDiscoveries wid sl =
-        SeqDiscoveries
-            <$> selectSeqAddressMap wid sl
-            <*> selectSeqAddressMap wid sl
+    loadDiscoveries wid sl = do
+        ext <- selectSeqAddressMap wid 0 sl
+        int <- selectSeqAddressMap wid 0 sl
+        pure $ SeqDiscoveries ext int
+
+    insertExtraPrologue wid accountIx (SeqPrologue st) =
+        insertPrologueForAccount wid accountIx st
+
+    deleteExtraPrologue wid accountIx = do
+        deleteWhere [SeqStateWalletId ==. wid, SeqStateAccountIndex ==. accountIx]
+        deleteWhere
+            [SeqStateAddressWalletId ==. wid, SeqStateAddressAccountIndex ==. accountIx]
+        deleteWhere
+            [ SeqStatePendingWalletId ==. wid
+            , SeqStatePendingAccountIndex ==. accountIx
+            ]
+        deleteWhere [TxMetaWalletId ==. wid, TxMetaAccountIndex ==. accountIx]
+
+    listPrologueAccounts wid =
+        fmap (seqStateAccountIndex . entityVal)
+            <$> selectList [SeqStateWalletId ==. wid] [Asc SeqStateAccountIndex]
+
+    loadExtraAccountState wid accountIx =
+        loadPrologueForAccount @n wid accountIx
+
+-- | Insert (or replace) the prologue for a specific account index.
+insertPrologueForAccount
+    :: forall n key
+     . ( PersistPublicKey (key 'AccountK)
+       , PersistPublicKey (key 'CredFromKeyK)
+       , PersistPublicKey (key 'PolicyK)
+       )
+    => W.WalletId
+    -> Word32
+    -> Seq.SeqState n key
+    -> SqlPersistT IO ()
+insertPrologueForAccount wid accountIx st = do
+    repsert (SeqStateKey wid accountIx)
+        $ SeqState
+            { seqStateWalletId = wid
+            , seqStateAccountIndex = accountIx
+            , seqStateExternalGap = Seq.getGap $ Seq.externalPool st
+            , seqStateInternalGap = Seq.getGap $ Seq.internalPool st
+            , seqStateAccountXPub = serializeXPub $ Seq.accountXPub st
+            , seqStatePolicyXPub = serializeXPub <$> Seq.policyXPub st
+            , seqStateRewardXPub = serializeXPub $ Seq.rewardAccountKey st
+            , seqStateDerivationPrefix = Seq.derivationPrefix st
+            , seqStateChangeAddrMode = Seq.changeAddressMode st
+            }
+    deleteWhere
+        [ SeqStatePendingWalletId ==. wid
+        , SeqStatePendingAccountIndex ==. accountIx
+        ]
+    dbChunked
+        insertMany_
+        (mkSeqStatePendingIxs wid accountIx $ Seq.pendingChangeIxs st)
+
+-- | Load the prologue for a specific account index.
+loadPrologueForAccount
+    :: forall n key
+     . ( PersistPublicKey (key 'AccountK)
+       , PersistPublicKey (key 'CredFromKeyK)
+       , PersistPublicKey (key 'PolicyK)
+       , MkKeyFingerprint key (Proxy n, key 'CredFromKeyK XPub)
+       , PaymentAddress key 'CredFromKeyK
+       , AddressCredential key ~ 'CredFromKeyK
+       , SoftDerivation key
+       , NetworkDiscriminantCheck key
+       , HasSNetworkId n
+       , (key == SharedKey) ~ 'False
+       )
+    => W.WalletId
+    -> Word32
+    -> SqlPersistT IO (Maybe (Seq.SeqState n key))
+loadPrologueForAccount wid accountIx = runMaybeT $ do
+    st <-
+        MaybeT
+            $ selectFirst
+                [ SeqStateWalletId ==. wid
+                , SeqStateAccountIndex ==. accountIx
+                ]
+                []
+    let SeqState
+            _
+            _
+            eGap
+            iGap
+            accountBytes
+            policyBytes
+            rewardBytes
+            prefix
+            changeAddrMode =
+                entityVal st
+    let accountXPub = unsafeDeserializeXPub accountBytes
+    let rewardXPub = unsafeDeserializeXPub rewardBytes
+    let policyXPub = unsafeDeserializeXPub <$> policyBytes
+    let intPool = Seq.newSeqAddressPool @n accountXPub iGap
+    let extPool = Seq.newSeqAddressPool @n accountXPub eGap
+    pendingChangeIxs <- lift $ selectSeqStatePendingIxs wid accountIx
+    pure
+        $ Seq.SeqState
+            intPool
+            extPool
+            pendingChangeIxs
+            accountXPub
+            policyXPub
+            rewardXPub
+            prefix
+            changeAddrMode
 
 mkSeqStatePendingIxs
-    :: W.WalletId -> PendingIxs 'CredFromKeyK -> [SeqStatePendingIx]
-mkSeqStatePendingIxs wid =
-    fmap (SeqStatePendingIx wid . W.getIndex) . pendingIxsToList
+    :: W.WalletId
+    -> Word32
+    -> PendingIxs 'CredFromKeyK
+    -> [SeqStatePendingIx]
+mkSeqStatePendingIxs wid accountIx =
+    fmap (SeqStatePendingIx wid accountIx . W.getIndex) . pendingIxsToList
 
 selectSeqStatePendingIxs
-    :: W.WalletId -> SqlPersistT IO (PendingIxs 'CredFromKeyK)
-selectSeqStatePendingIxs wid =
+    :: W.WalletId -> Word32 -> SqlPersistT IO (PendingIxs 'CredFromKeyK)
+selectSeqStatePendingIxs wid accountIx =
     pendingIxsFromList . fromRes
         <$> selectList
-            [SeqStatePendingWalletId ==. wid]
+            [ SeqStatePendingWalletId ==. wid
+            , SeqStatePendingAccountIndex ==. accountIx
+            ]
             [Desc SeqStatePendingIxIndex]
   where
     fromRes = fmap (W.Index . seqStatePendingIxIndex . entityVal)
@@ -551,15 +646,17 @@ insertSeqAddressMap
        , HasSNetworkId n
        )
     => W.WalletId
+    -> Word32
     -> W.SlotNo
     -> SeqAddressMap c key
     -> SqlPersistT IO ()
-insertSeqAddressMap wid sl (SeqAddressMap pool) =
+insertSeqAddressMap wid accountIx sl (SeqAddressMap pool) =
     void
         $ dbChunked
             insertMany_
             [ SeqStateAddress
                 wid
+                accountIx
                 sl
                 (liftPaymentAddress @key @'CredFromKeyK (sNetworkId @n) addr)
                 (W.getIndex ix)
@@ -574,15 +671,16 @@ selectSeqAddressMap
      . ( MkKeyFingerprint key W.Address
        , Typeable c
        )
-    => W.WalletId -> W.SlotNo -> SqlPersistT IO (SeqAddressMap c key)
-selectSeqAddressMap wid sl = do
-    SeqAddressMap . Map.fromList . map (toTriple . entityVal)
-        <$> selectList
+    => W.WalletId -> Word32 -> W.SlotNo -> SqlPersistT IO (SeqAddressMap c key)
+selectSeqAddressMap wid accountIx sl = do
+    result <- selectList
             [ SeqStateAddressWalletId ==. wid
+            , SeqStateAddressAccountIndex ==. accountIx
             , SeqStateAddressSlot ==. sl
             , SeqStateAddressRole ==. roleVal @c
             ]
             [Asc SeqStateAddressIndex]
+    pure $ SeqAddressMap . Map.fromList . map (toTriple . entityVal) $ result
   where
     toTriple x =
         ( unsafePaymentKeyFingerprint @key (seqStateAddressAddress x)
@@ -668,12 +766,12 @@ instance
     insertDiscoveries wid sl sharedDiscoveries = do
         dbChunked
             insertMany_
-            [ SeqStateAddress wid sl addr ix UtxoExternal status
+            [ SeqStateAddress wid 0 sl addr ix UtxoExternal status
             | (ix, addr, status) <- map convert $ Map.toList extAddrs
             ]
         dbChunked
             insertMany_
-            [ SeqStateAddress wid sl addr ix UtxoInternal status
+            [ SeqStateAddress wid 0 sl addr ix UtxoInternal status
             | (ix, addr, status) <- map convert $ Map.toList intAddrs
             ]
       where
@@ -757,6 +855,7 @@ instance
                 map entityVal
                     <$> selectList
                         [ SeqStateAddressWalletId ==. wid
+                        , SeqStateAddressAccountIndex ==. (0 :: Word32)
                         , SeqStateAddressSlot ==. sl
                         , SeqStateAddressRole ==. roleVal @c
                         ]
@@ -765,7 +864,7 @@ instance
                 $ SharedAddressMap
                 $ Map.fromList
                     [ (fingerprint, (toEnum $ fromIntegral ix, status))
-                    | SeqStateAddress _ _ addr ix _ status <- addrs
+                    | SeqStateAddress _ _ _ addr ix _ status <- addrs
                     , Right fingerprint <- [paymentKeyFingerprint addr]
                     ]
 

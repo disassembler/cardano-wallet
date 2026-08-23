@@ -1,5 +1,8 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedLabels #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
+{-# OPTIONS_GHC -Wno-deprecations #-}
 
 -- |
 -- Copyright: © 2021–2023 IOHK
@@ -69,7 +72,8 @@ import qualified Cardano.Wallet.Primitive.Types as W
 -- which stores all the sub-stores for the various components of the wallet.
 -- TODO: Remove the WalletId parameter as we are storing on a per-wallet basis.
 mkStoreWallet
-    :: PersistAddressBook s
+    :: forall s.
+       PersistAddressBook s
     => WalletFlavorS s
     -> W.WalletId
     -> UpdateStore (SqlPersistT IO) (DeltaWalletState s)
@@ -113,6 +117,10 @@ mkStoreWallet wF wid = mkUpdateStore load write update
     update = updateLoad load throwIO $ updateSequence update1
       where
         update1 _ (ReplacePrologue prologue') = insertPrologue wid prologue'
+        update1 _ (InsertExtraPrologue accountIx p) =
+            insertExtraPrologue wid accountIx p
+        update1 _ (DeleteExtraPrologue accountIx) =
+            deleteExtraPrologue @s wid accountIx
         update1 s (UpdateCheckpoints delta) =
             updateS checkpointsStore (Just $ checkpoints s) delta
         update1 s (UpdateSubmissions deltas) =
