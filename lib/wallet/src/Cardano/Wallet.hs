@@ -128,6 +128,7 @@ module Cardano.Wallet
     , readAccountUTxO
     , listAccountUtxoStatistics
     , listAccountAddresses
+    , createAccountMigrationPlan
     , AccountSummary (..)
     , ErrAddAccount (..)
     , ErrDeleteAccount (..)
@@ -3457,8 +3458,12 @@ buildAndSignTransaction
     -> Passphrase "user"
     -> TransactionCtx
     -> SelectionOf TxOut
+    -> (Address -> Maybe (NonEmpty DerivationIndex))
+    -- ^ Extra path lookup for inputs not owned by the checkpoint state
+    -- (e.g. inputs from a non-default account). Pass @const Nothing@ when
+    -- all inputs belong to account 0H.
     -> ExceptT ErrSignPayment IO (Tx, TxMeta, UTCTime, SealedTx)
-buildAndSignTransaction ctx wid mkRwdAcct pwd txCtx sel =
+buildAndSignTransaction ctx wid mkRwdAcct pwd txCtx sel extraPathLookup =
     db & \DBLayer{..} ->
         withRootKey
             (contramap MsgWallet (logger_ ctx))
@@ -3522,7 +3527,11 @@ buildAndSignTransaction ctx wid mkRwdAcct pwd txCtx sel =
                                             (toWallet ledIn)
                                             walletUtxo
                                             >>= \(TxOut addr _) ->
-                                                fst (isOurs addr walletSt)
+                                                let fromCheckpoint =
+                                                        fst (isOurs addr walletSt)
+                                                in  case fromCheckpoint of
+                                                        Just _ -> fromCheckpoint
+                                                        Nothing -> extraPathLookup addr
                                     )
                                     ( Set.toList
                                         $ unsignedTx ^. bodyTxL . inputsTxBodyL
@@ -5162,6 +5171,29 @@ listAccountAddresses ctx normalize accountIx
                     $ knownAddresses seqSt
   where
     db = ctx ^. dbLayer
+
+-- | Create a 'MigrationPlan' scoped to a single account's UTxO.
+-- Callers use 'migrationPlanToSelectionWithdrawals' and
+-- 'buildAndSignTransaction' (with the account's 'isOurs' as
+-- @extraPathLookup@) to build and submit the consolidation transaction.
+createAccountMigrationPlan
+    :: forall s n k
+     . ( s ~ SeqState n k
+       , IsOurs s Address
+       )
+    => WalletLayer IO s
+    -> Index 'Hardened 'AccountK
+    -> IO MigrationPlan
+createAccountMigrationPlan ctx accountIx = do
+    let nl = ctx ^. networkLayer
+        tl = transactionLayer_ ctx
+    acctUtxo <- readAccountUTxO ctx accountIx
+    (Write.PParamsInAnyRecentEra _era pp, _) <-
+        readNodeTipStateForTxWrite nl
+    let constraints = txConstraints pp (transactionWitnessTag tl)
+    pure
+        $ Migration.createPlan constraints acctUtxo
+        $ Migration.RewardWithdrawal (Coin 0)
 
 -- | Retrieve any public account key of a wallet.
 getAccountPublicKeyAtIndex

@@ -140,6 +140,7 @@ import Cardano.Wallet.Api.Http.Shelley.Server
     , listWalletAccountAddressesH
     , listWalletAccountTransactionsH
     , listWalletAccountsH
+    , postWalletAccountConsolidateH
     , postAccountPublicKey
     , postAccountWallet
     , postWalletAccount
@@ -342,7 +343,7 @@ server byron icarus shelley multisig spl drepLayer ntp blockchainSource =
             :<|> (\_ _ _ -> throwError err501)
             :<|> listWalletAccountTransactionsH shelley
             :<|> (\_ _ _ -> throwError err501)
-            :<|> (\_ _ _ -> throwError err501)
+            :<|> postWalletAccountConsolidateH shelley
 
     wallets :: Server Wallets
     wallets =

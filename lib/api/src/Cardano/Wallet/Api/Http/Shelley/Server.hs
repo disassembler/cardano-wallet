@@ -114,6 +114,7 @@ module Cardano.Wallet.Api.Http.Shelley.Server
     , listWalletAccountTransactionsH
     , listWalletAccountsH
     , deleteWalletAccountH
+    , postWalletAccountConsolidateH
 
       -- * Server error responses
     , IsServerError (..)
@@ -230,6 +231,7 @@ import Cardano.Wallet
     , dummyChangeAddressGen
     , genesisData
     , getCurrentEpochSlotting
+    , createAccountMigrationPlan
     , listAccountAddresses
     , listAccountUtxoStatistics
     , listWalletAccounts
@@ -258,6 +260,7 @@ import Cardano.Wallet.Address.Derivation
     , HardDerivation (..)
     , Index (..)
     , MkKeyFingerprint
+    , PaymentAddress (..)
     , RewardAccount (..)
     , Role
     , SoftDerivation (..)
@@ -289,7 +292,7 @@ import Cardano.Wallet.Address.Discovery
     , GenChange (ArgGenChange)
     , GetAccount
     , GetPurpose (..)
-    , IsOurs
+    , IsOurs (..)
     , KnownAddresses
     )
 import Cardano.Wallet.Address.Discovery.Random
@@ -378,6 +381,7 @@ import Cardano.Wallet.Api.Types
     , ApiAccountSharedPublicKey (..)
     , ApiActiveSharedWallet (..)
     , ApiAddressWithPath (..)
+    , ApiConsolidateRequest (..)
     , ApiAnyCertificate (..)
     , ApiAsArray (..)
     , ApiAsset (..)
@@ -1253,6 +1257,99 @@ deleteWalletAccountH ctx (ApiT wid) (ApiT (DerivationIndex accountIxW)) =
             $ deleteWalletAccount wrk
             $ (Index accountIxW :: Index 'Hardened 'AccountK)
         return NoContent
+
+-- | Consolidate all UTxOs in a specific account into fewer entries.
+-- Creates, signs, and submits a single transaction from the account's UTxO
+-- back to the account's own addresses. Uses the account's SeqState for key
+-- derivation so non-0H accounts sign with their correct derivation paths.
+postWalletAccountConsolidateH
+    :: forall ctx s n k
+     . ( ctx ~ ApiLayer s
+       , s ~ SeqState n k
+       , Seq.SupportsDiscovery n k
+       , IsOurs s Address
+       , WalletFlavor s
+       , HasNetworkLayer IO ctx
+       , Bounded (Index (AddressIndexDerivationType k) (AddressCredential k))
+       , PaymentAddress k 'CredFromKeyK
+       , HasDelegation s
+       )
+    => ctx
+    -> ApiT WalletId
+    -> ApiT DerivationIndex
+    -> ApiConsolidateRequest
+    -> Handler (ApiTransaction n)
+postWalletAccountConsolidateH ctx@ApiLayer{..} (ApiT wid) (ApiT (DerivationIndex accountIxW)) body =
+    withWorkerCtx ctx wid liftE liftE $ \wrk -> do
+        let db = wrk ^. W.dbLayer
+            tr = wrk ^. W.logger
+            accountIx = Index accountIxW :: Index 'Hardened 'AccountK
+            pwd = coerce $ getApiT $ body ^. #passphrase
+        accountSeqSt <- liftIO $ do
+            if accountIx == minBound
+                then do
+                    cp <- db & \W.DBLayer{..} -> atomically readCheckpoint
+                    pure (Just (getState cp))
+                else db & \W.DBLayer{..} -> atomically $ readSeqStateForAccount accountIxW
+        plan <- liftIO $ createAccountMigrationPlan wrk accountIx
+        ttl <- liftIO $ W.transactionExpirySlot ti Nothing
+        pp <- liftIO $ NW.currentProtocolParameters netLayer
+        addrs <- liftIO $ listAccountAddresses wrk (const Just) accountIx
+        outputAddresses <-
+            case NE.nonEmpty [a | (a, _, path) <- addrs, isExternal path] of
+                Nothing ->
+                    liftHandler $ throwE W.ErrCreateMigrationPlanEmpty
+                Just as -> pure as
+        selectionWithdrawals <-
+            liftHandler
+                $ failWith W.ErrCreateMigrationPlanEmpty
+                $ W.migrationPlanToSelectionWithdrawals plan NoWithdrawal outputAddresses
+        let (selection, _withdrawal) = NE.head selectionWithdrawals
+            mkRewardAccount = selfRewardAccountBuilder (keyFlavorFromState @s)
+            txContext =
+                defaultTransactionCtx
+                    { txValidityInterval = (Nothing, ttl)
+                    }
+            extraPathLookup addr = case accountSeqSt of
+                Nothing -> Nothing
+                Just st -> fst (isOurs addr st)
+        (tx, txMeta, txTime, sealedTx) <-
+            liftHandler
+                $ W.buildAndSignTransaction
+                    wrk
+                    wid
+                    mkRewardAccount
+                    pwd
+                    txContext
+                    (selection{change = []})
+                    extraPathLookup
+        liftHandler
+            $ W.submitTx tr db netLayer
+            $ BuiltTx{builtTx = tx, builtTxMeta = txMeta, builtSealedTx = sealedTx}
+        mkApiTransaction
+            ti
+            wrk
+            #pendingSince
+            MkApiTransactionParams
+                { txId = tx ^. #txId
+                , txFee = tx ^. #fee
+                , txInputs = NE.toList $ second Just <$> selection ^. #inputs
+                , txCollateralInputs = []
+                , txOutputs = tx ^. #outputs
+                , txCollateralOutput = tx ^. #collateralOutput
+                , txWithdrawals = tx ^. #withdrawals
+                , txMeta
+                , txMetadata = Nothing
+                , txTime
+                , txScriptValidity = tx ^. #scriptValidity
+                , txDeposit = W.stakeKeyDeposit pp
+                , txMetadataSchema = TxMetadataDetailedSchema
+                , txCBOR = tx ^. #txCBOR
+                }
+  where
+    ti :: TimeInterpreter (ExceptT PastHorizonException IO)
+    ti = timeInterpreter (ctx ^. networkLayer)
+    isExternal path = NE.length path > 3 && path NE.!! 3 == DerivationIndex 0
 
 -- | List known addresses for a specific account, optionally filtered by state.
 listWalletAccountAddressesH
@@ -5410,6 +5507,7 @@ migrateWallet ctx@ApiLayer{..} withdrawalType (ApiT wid) postData = do
                         pwd
                         txContext
                         (selection{change = []})
+                        (const Nothing)
 
             liftHandler
                 $ W.submitTx
