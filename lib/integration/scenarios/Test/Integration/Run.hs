@@ -73,6 +73,7 @@ import qualified Test.Integration.Scenario.API.Network as Network
 import qualified Test.Integration.Scenario.API.Shared.Addresses as SharedAddresses
 import qualified Test.Integration.Scenario.API.Shared.Transactions as SharedTransactions
 import qualified Test.Integration.Scenario.API.Shared.Wallets as SharedWallets
+import qualified Test.Integration.Scenario.API.Shelley.Accounts as Accounts
 import qualified Test.Integration.Scenario.API.Shelley.Addresses as Addresses
 import qualified Test.Integration.Scenario.API.Shelley.ChainSync as ChainSync
 import qualified Test.Integration.Scenario.API.Shelley.CoinSelections as CoinSelections
@@ -112,6 +113,7 @@ main = withTestsSetup $ \testDir (tr, tracers) -> do
         aroundAll (withContext testingCtx) $ do
             describe "API Specifications" $ do
                 parallel $ do
+                    Accounts.spec @n
                     Addresses.spec @n
                     CoinSelections.spec @n
                     Blocks.spec

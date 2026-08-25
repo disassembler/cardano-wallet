@@ -49,6 +49,12 @@ module Cardano.Wallet.Api.Link
     , createMigrationPlan
     , migrateWallet
 
+      -- * Wallet Accounts
+    , listWalletAccounts
+    , getWalletAccount
+    , putWalletAccountMode
+    , postWalletAccountConsolidate
+
       -- * WalletKeys
     , getWalletKey
     , signMetadata
@@ -386,6 +392,61 @@ createMigrationPlan w =
         (endpoint @(Api.CreateShelleyWalletMigrationPlan Net) (wid &))
         (endpoint @(Api.CreateByronWalletMigrationPlan Net) (wid &))
         (notSupported "Shared")
+  where
+    wid = w ^. typed @(ApiT WalletId)
+
+--
+-- Wallet Accounts
+--
+
+listWalletAccounts
+    :: forall w
+     . ( HasCallStack
+       , HasType (ApiT WalletId) w
+       )
+    => w
+    -> (Method, Text)
+listWalletAccounts w =
+    endpoint @Api.ListWalletAccounts (wid &)
+  where
+    wid = w ^. typed @(ApiT WalletId)
+
+getWalletAccount
+    :: forall w
+     . ( HasCallStack
+       , HasType (ApiT WalletId) w
+       )
+    => w
+    -> ApiT DerivationIndex
+    -> (Method, Text)
+getWalletAccount w idx =
+    endpoint @Api.GetWalletAccount (\mk -> mk wid idx)
+  where
+    wid = w ^. typed @(ApiT WalletId)
+
+putWalletAccountMode
+    :: forall w
+     . ( HasCallStack
+       , HasType (ApiT WalletId) w
+       )
+    => w
+    -> ApiT DerivationIndex
+    -> (Method, Text)
+putWalletAccountMode w idx =
+    endpoint @Api.PutWalletAccountMode (\mk -> mk wid idx)
+  where
+    wid = w ^. typed @(ApiT WalletId)
+
+postWalletAccountConsolidate
+    :: forall w
+     . ( HasCallStack
+       , HasType (ApiT WalletId) w
+       )
+    => w
+    -> ApiT DerivationIndex
+    -> (Method, Text)
+postWalletAccountConsolidate w idx =
+    endpoint @(Api.PostWalletAccountConsolidate Net) (\mk -> mk wid idx)
   where
     wid = w ^. typed @(ApiT WalletId)
 
