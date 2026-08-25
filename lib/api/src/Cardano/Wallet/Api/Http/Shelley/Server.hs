@@ -923,6 +923,10 @@ import Servant.Server
     ( Handler (..)
     , runHandler
     )
+import System.IO
+    ( hPutStrLn
+    , stderr
+    )
 import System.Random
     ( randomRIO
     )
@@ -1281,6 +1285,7 @@ postWalletAccountConsolidateH
     -> Handler (ApiTransaction n)
 postWalletAccountConsolidateH ctx@ApiLayer{..} (ApiT wid) (ApiT (DerivationIndex accountIxW)) body =
     withWorkerCtx ctx wid liftE liftE $ \wrk -> do
+        liftIO $ hPutStrLn stderr "CONSOLIDATE_HANDLER: entry reached"
         let db = wrk ^. W.dbLayer
             tr = wrk ^. W.logger
             accountIx = Index accountIxW :: Index 'Hardened 'AccountK
