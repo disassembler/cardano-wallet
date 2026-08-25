@@ -357,7 +357,7 @@ import Cardano.Slotting.Slot
     ( SlotNo (..)
     )
 import Cardano.Wallet.Address.Book
-    ( AddressBookIso
+    ( AddressBookIso (mergeUserSettings)
     , Prologue (..)
     , getDiscoveries
     , getPrologue
@@ -1804,17 +1804,6 @@ restoreBlocks ctx tr blocks nodeTip =
                     (localTip ^. #blockHeight)
                     (wallet ^. #checkpoints)
 
-            -- NOTE: We have to update the 'Prologue' as well,
-            -- as it can contain addresses for pending transactions,
-            -- which are removed from the 'Prologue' once the
-            -- transactions are accepted onto the chain and discovered.
-            --
-            -- I'm not so sure that the approach here is correct with
-            -- respect to rollbacks, but it is functionally the same
-            -- as the code that came before.
-            deltaPrologue =
-                [ReplacePrologue $ getPrologue $ getState $ NE.last cps]
-
         liftIO $ forM_ txs $ \(Tx{txCBOR = mcbor}, _) ->
             forM_ mcbor $ \cbor -> do
                 traceWith tr $ MsgStoringCBOR cbor
@@ -1830,8 +1819,18 @@ restoreBlocks ctx tr blocks nodeTip =
             liftIO $ logDelegation delegation
             putDelegationCertificate walletState cert slotNo
 
-        Delta.onDBVar walletState $ Delta.update $ \_wallet ->
-            deltaPrologue
+        -- NOTE: We have to update the 'Prologue' as well,
+        -- as it can contain addresses for pending transactions,
+        -- which are removed from the 'Prologue' once the
+        -- transactions are accepted onto the chain and discovered.
+        --
+        -- We use the current wallet's prologue to preserve any user-set
+        -- fields (e.g. changeAddressMode) that may have been updated
+        -- independently of block application.
+        Delta.onDBVar walletState $ Delta.update $ \wallet ->
+            let newPrologue = getPrologue $ getState $ NE.last cps
+                mergedPrologue = mergeUserSettings (wallet ^. #prologue) newPrologue
+            in  [ReplacePrologue mergedPrologue]
                 <> [UpdateCheckpoints deltaPutCheckpoints]
                 <> deltaPruneSubmissions
 
