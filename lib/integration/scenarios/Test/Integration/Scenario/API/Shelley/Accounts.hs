@@ -16,6 +16,7 @@ import Cardano.Wallet.Address.Derivation
 import Cardano.Wallet.Api.Types
     ( AccountMode (..)
     , ApiAccount
+    , ApiAddressWithPath
     , ApiT (..)
     , ApiTransaction
     , ApiWallet
@@ -36,12 +37,16 @@ import Control.Monad.Trans.Resource
 import Data.Generics.Internal.VL.Lens
     ( (^.)
     )
+import Numeric.Natural
+    ( Natural
+    )
 import Test.Hspec
     ( SpecWith
     , describe
     )
 import Test.Hspec.Expectations.Lifted
     ( shouldBe
+    , shouldSatisfy
     )
 import Test.Hspec.Extra
     ( it
@@ -55,6 +60,8 @@ import Test.Integration.Framework.DSL
     , expectResponseCode
     , fixturePassphrase
     , fixtureWalletWith
+    , getFromResponse
+    , getResponse
     , json
     , request
     , verify
@@ -68,6 +75,10 @@ import Prelude
 -- | Account 0H raw index (hardened, first account).
 acct0H :: ApiT DerivationIndex
 acct0H = ApiT (DerivationIndex 0x80000000)
+
+-- | Account 1H raw index (hardened, second account).
+acct1H :: ApiT DerivationIndex
+acct1H = ApiT (DerivationIndex 0x80000001)
 
 spec :: forall n. HasSNetworkId n => SpecWith Context
 spec = describe "SHELLEY_ACCOUNTS" $ do
@@ -158,3 +169,146 @@ spec = describe "SHELLEY_ACCOUNTS" $ do
                     , expectField #addressDerivationMode
                         (`shouldBe` AccountModeSingleAddress)
                     ]
+
+    it
+        "ACCOUNTS_02 - Transfer between 0H and 1H single-address accounts; \
+        \change stays on 0H, signing works on 1H"
+        $ \ctx -> runResourceT $ do
+            -- Setup: seed 0H with UTxOs across multiple HD addresses so we
+            -- have something to consolidate.
+            w <- fixtureWalletWith @n ctx
+                [ 3_000_000
+                , 3_000_000
+                , 3_000_000
+                , 3_000_000
+                , 3_000_000
+                ]
+
+            -- 1. Consolidate 0H so all funds sit on one change address.
+            rConsolidate <-
+                request @[ApiTransaction n]
+                    ctx
+                    (Link.postWalletAccountConsolidate w acct0H)
+                    Default
+                    (Json [json|{"passphrase": #{fixturePassphrase}}|])
+            verify rConsolidate [expectResponseCode HTTP.status202]
+            liftIO $ waitForTxImmutability ctx
+
+            -- 2. Switch 0H to single-address mode.
+            void $ request @ApiAccount ctx
+                (Link.putWalletAccountMode w acct0H) Default
+                (Json [json|{"mode": "account_mode_single_address"}|])
+
+            -- 3. Record 0H's consolidated balance.
+            rAcct0H_before <-
+                request @ApiAccount ctx (Link.getWalletAccount w acct0H) Default Empty
+            verify rAcct0H_before [expectResponseCode HTTP.status200]
+            let bal0H_before =
+                    getFromResponse (#balance . #available . #toNatural) rAcct0H_before
+
+            -- 4. Add account 1H.
+            rPost1H <-
+                request @ApiAccount ctx (Link.postWalletAccount w) Default
+                    (Json [json|{"account_index": "1H", "passphrase": #{fixturePassphrase}}|])
+            verify rPost1H [expectResponseCode HTTP.status201]
+
+            -- 5. Switch 1H to single-address mode.
+            void $ request @ApiAccount ctx
+                (Link.putWalletAccountMode w acct1H) Default
+                (Json [json|{"mode": "account_mode_single_address"}|])
+
+            -- 6. Get 1H's receive address (first address in the pool).
+            rAddrs1H <-
+                request @[ApiAddressWithPath n] ctx
+                    (Link.listWalletAccountAddresses w acct1H) Default Empty
+            verify rAddrs1H [expectResponseCode HTTP.status200]
+            let addr1H = (getResponse rAddrs1H !! 0) ^. #id
+
+            -- 7. Send 4 ADA from 0H to 1H.
+            let sendAmt = 4_000_000 :: Natural
+            rSend <-
+                request @(ApiTransaction n) ctx
+                    (Link.createWalletAccountTransaction w acct0H) Default
+                    (Json [json|{
+                        "payments": [{
+                            "address": #{addr1H},
+                            "amount": {"quantity": #{sendAmt}, "unit": "lovelace"}
+                        }],
+                        "passphrase": #{fixturePassphrase}
+                    }|])
+            verify rSend [expectResponseCode HTTP.status202]
+            liftIO $ waitForTxImmutability ctx
+
+            -- 8. Verify 0H balance decreased (by sendAmt + fees).
+            rAcct0H_after <-
+                request @ApiAccount ctx (Link.getWalletAccount w acct0H) Default Empty
+            verify rAcct0H_after [expectResponseCode HTTP.status200]
+            let bal0H_after =
+                    getFromResponse (#balance . #available . #toNatural) rAcct0H_after
+            liftIO $ bal0H_after `shouldSatisfy` (< bal0H_before - sendAmt)
+
+            -- 9. Verify 1H received exactly 4 ADA.
+            eventually "1H balance reflects received funds" $ do
+                rAcct1H <-
+                    request @ApiAccount ctx
+                        (Link.getWalletAccount w acct1H) Default Empty
+                verify rAcct1H
+                    [ expectResponseCode HTTP.status200
+                    , expectField
+                        (#balance . #available . #toNatural)
+                        (`shouldBe` sendAmt)
+                    ]
+
+            -- 10. Verify the send appears in 0H's transaction list.
+            rTxs0H <-
+                request @[ApiTransaction n] ctx
+                    (Link.listWalletAccountTransactions w acct0H) Default Empty
+            verify rTxs0H [expectResponseCode HTTP.status200]
+            liftIO $ length (getResponse rTxs0H) `shouldSatisfy` (> 0)
+
+            -- 11. Verify the receive appears in 1H's transaction list.
+            rTxs1H <-
+                request @[ApiTransaction n] ctx
+                    (Link.listWalletAccountTransactions w acct1H) Default Empty
+            verify rTxs1H [expectResponseCode HTTP.status200]
+            liftIO $ length (getResponse rTxs1H) `shouldSatisfy` (> 0)
+
+            -- 12. Get 0H's single receive address to send back to.
+            rAddrs0H <-
+                request @[ApiAddressWithPath n] ctx
+                    (Link.listWalletAccountAddresses w acct0H) Default Empty
+            verify rAddrs0H [expectResponseCode HTTP.status200]
+            let addr0H = (getResponse rAddrs0H !! 0) ^. #id
+
+            -- 13. Send 2 ADA back from 1H to 0H to verify 1H can sign.
+            let returnAmt = 2_000_000 :: Natural
+            rReturn <-
+                request @(ApiTransaction n) ctx
+                    (Link.createWalletAccountTransaction w acct1H) Default
+                    (Json [json|{
+                        "payments": [{
+                            "address": #{addr0H},
+                            "amount": {"quantity": #{returnAmt}, "unit": "lovelace"}
+                        }],
+                        "passphrase": #{fixturePassphrase}
+                    }|])
+            verify rReturn [expectResponseCode HTTP.status202]
+            liftIO $ waitForTxImmutability ctx
+
+            -- 14. Verify final balances: 0H recovered ~2 ADA, 1H has ~2 ADA minus fee.
+            rFinal0H <-
+                request @ApiAccount ctx (Link.getWalletAccount w acct0H) Default Empty
+            rFinal1H <-
+                request @ApiAccount ctx (Link.getWalletAccount w acct1H) Default Empty
+            verify rFinal0H [expectResponseCode HTTP.status200]
+            verify rFinal1H [expectResponseCode HTTP.status200]
+            let finalBal0H =
+                    getFromResponse (#balance . #available . #toNatural) rFinal0H
+            let finalBal1H =
+                    getFromResponse (#balance . #available . #toNatural) rFinal1H
+            -- 0H gained returnAmt back (minus consolidation fee already counted)
+            liftIO $ finalBal0H `shouldSatisfy` (> bal0H_after)
+            -- 1H spent returnAmt so its balance < sendAmt
+            liftIO $ finalBal1H `shouldSatisfy` (< sendAmt)
+            -- 1H has something left (sendAmt - returnAmt - fee > 0)
+            liftIO $ finalBal1H `shouldSatisfy` (> 0)

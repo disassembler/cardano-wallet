@@ -50,8 +50,12 @@ module Cardano.Wallet.Api.Link
     , migrateWallet
 
       -- * Wallet Accounts
+    , postWalletAccount
     , listWalletAccounts
     , getWalletAccount
+    , listWalletAccountAddresses
+    , createWalletAccountTransaction
+    , listWalletAccountTransactions
     , putWalletAccountMode
     , postWalletAccountConsolidate
 
@@ -399,6 +403,16 @@ createMigrationPlan w =
 -- Wallet Accounts
 --
 
+postWalletAccount
+    :: forall w
+     . HasType (ApiT WalletId) w
+    => w
+    -> (Method, Text)
+postWalletAccount w =
+    endpoint @Api.PostWalletAccount (wid &)
+  where
+    wid = w ^. typed @(ApiT WalletId)
+
 listWalletAccounts
     :: forall w
      . HasType (ApiT WalletId) w
@@ -417,6 +431,41 @@ getWalletAccount
     -> (Method, Text)
 getWalletAccount w idx =
     endpoint @Api.GetWalletAccount (\mk -> mk wid idx)
+  where
+    wid = w ^. typed @(ApiT WalletId)
+
+listWalletAccountAddresses
+    :: forall w
+     . HasType (ApiT WalletId) w
+    => w
+    -> ApiT DerivationIndex
+    -> (Method, Text)
+listWalletAccountAddresses w idx =
+    endpoint @(Api.ListWalletAccountAddresses Net) (\mk -> mk wid idx Nothing)
+  where
+    wid = w ^. typed @(ApiT WalletId)
+
+createWalletAccountTransaction
+    :: forall w
+     . HasType (ApiT WalletId) w
+    => w
+    -> ApiT DerivationIndex
+    -> (Method, Text)
+createWalletAccountTransaction w idx =
+    endpoint @(Api.CreateWalletAccountTransaction Net) (\mk -> mk wid idx)
+  where
+    wid = w ^. typed @(ApiT WalletId)
+
+listWalletAccountTransactions
+    :: forall w
+     . HasType (ApiT WalletId) w
+    => w
+    -> ApiT DerivationIndex
+    -> (Method, Text)
+listWalletAccountTransactions w idx =
+    endpoint @(Api.ListWalletAccountTransactions Net)
+        (\mk -> mk wid idx Nothing Nothing Nothing Nothing Nothing Nothing
+            (toSimpleMetadataFlag TxMetadataDetailedSchema))
   where
     wid = w ^. typed @(ApiT WalletId)
 
