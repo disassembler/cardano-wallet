@@ -122,6 +122,7 @@ module Cardano.Wallet
     , getCurrentEpochSlotting
     , setChangeAddressMode
     , setChangeAddressModeShared
+    , setChangeAddressModeForAccount
     , addWalletAccount
     , listWalletAccounts
     , deleteWalletAccount
@@ -4941,6 +4942,33 @@ setChangeAddressMode ctx mode =
         let (SeqPrologue seqState) = WS.prologue s
             seqState' = seqState & #changeAddressMode .~ mode
         in  [ReplacePrologue $ SeqPrologue seqState']
+
+-- | Update 'changeAddressMode' for a specific account.
+-- For account 0H (minBound) this delegates to 'setChangeAddressMode';
+-- for extra accounts it reads the stored prologue, patches the mode field,
+-- and writes it back via 'InsertExtraPrologue'.
+setChangeAddressModeForAccount
+    :: forall s n k
+     . ( s ~ SeqState n k
+       , k ~ ShelleyKey
+       )
+    => WalletLayer IO s
+    -> Index 'Hardened 'AccountK
+    -> ChangeAddressMode
+    -> IO ()
+setChangeAddressModeForAccount ctx accountIx mode
+    | accountIx == minBound = setChangeAddressMode ctx mode
+    | otherwise =
+        db & \DBLayer{..} -> do
+            mSt <- atomically $ readSeqStateForAccount accountIxW
+            case mSt of
+                Nothing -> pure ()
+                Just st ->
+                    onWalletState ctx $ update $ \_ ->
+                        [InsertExtraPrologue accountIxW (SeqPrologue (st & #changeAddressMode .~ mode))]
+  where
+    db = ctx ^. dbLayer
+    accountIxW = getIndex accountIx
 
 setChangeAddressModeShared
     :: forall s n

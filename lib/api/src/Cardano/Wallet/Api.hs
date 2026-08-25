@@ -591,7 +591,7 @@ type PostWalletAccountConsolidate n =
         :> "utxo"
         :> "consolidate"
         :> ReqBody '[JSON] ApiConsolidateRequest
-        :> PostAccepted '[JSON] (ApiTransactionT n)
+        :> PostAccepted '[JSON] [ApiTransactionT n]
 
 {-------------------------------------------------------------------------------
                                   Wallet Keys

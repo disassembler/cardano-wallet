@@ -115,6 +115,7 @@ module Cardano.Wallet.Api.Http.Shelley.Server
     , listWalletAccountsH
     , deleteWalletAccountH
     , postWalletAccountConsolidateH
+    , putWalletAccountModeH
 
       -- * Server error responses
     , IsServerError (..)
@@ -247,6 +248,8 @@ import Cardano.Wallet
     , signTransactionV2
     , txWitnessTagForKey
     , walletSyncProgress
+    , setChangeAddressModeForAccount
+    , normalizeDelegationAddress
     )
 import Cardano.Wallet.Address.Book
     ( AddressBookIso
@@ -260,7 +263,6 @@ import Cardano.Wallet.Address.Derivation
     , HardDerivation (..)
     , Index (..)
     , MkKeyFingerprint
-    , PaymentAddress (..)
     , RewardAccount (..)
     , Role
     , SoftDerivation (..)
@@ -382,6 +384,7 @@ import Cardano.Wallet.Api.Types
     , ApiActiveSharedWallet (..)
     , ApiAddressWithPath (..)
     , ApiConsolidateRequest (..)
+    , ApiSetAccountMode (..)
     , ApiAnyCertificate (..)
     , ApiAsArray (..)
     , ApiAsset (..)
@@ -923,10 +926,6 @@ import Servant.Server
     ( Handler (..)
     , runHandler
     )
-import System.IO
-    ( hPutStrLn
-    , stderr
-    )
 import System.Random
     ( randomRIO
     )
@@ -1118,10 +1117,17 @@ getWalletAccount ctx (ApiT wid) (ApiT (DerivationIndex accountIxW)) =
         (cp, _, _) <- handler $ readWallet wrk
         progress <- liftIO $ walletSyncProgress @_ @_ ctx cp
         let ti = timeInterpreter (ctx ^. networkLayer)
+            db = wrk ^. W.dbLayer
+            minIx = getIndex (minBound :: Index 'Hardened 'AccountK)
         tip' <- liftIO
             $ getWalletTip
                 (neverFails "getWalletTip for getWalletAccount" ti)
                 cp
+        mode <- liftIO $ if accountIxW == minIx
+            then pure $ fromChangeAddressMode $ Seq.changeAddressMode (getState cp)
+            else do
+                mSt <- db & \W.DBLayer{..} -> atomically $ readSeqStateForAccount accountIxW
+                pure $ maybe AccountModeHD (fromChangeAddressMode . Seq.changeAddressMode) mSt
         pure
             ApiAccount
                 { accountIndex = ApiT (DerivationIndex accountIxW)
@@ -1149,7 +1155,7 @@ getWalletAccount ctx (ApiT wid) (ApiT (DerivationIndex accountIxW)) =
                         }
                 , rewardAccountKey = Nothing
                 , addressPoolGap = ApiT defaultAddressPoolGap
-                , addressDerivationMode = AccountModeHD
+                , addressDerivationMode = mode
                 , state = ApiT progress
                 , tip = tip'
                 }
@@ -1164,6 +1170,10 @@ getWalletAccount ctx (ApiT wid) (ApiT (DerivationIndex accountIxW)) =
                 accounts <- lift $ listWalletAccounts wrk
                 unless (accountIxW `elem` accounts)
                     $ throwE ErrGetAccountNotFound
+    fromChangeAddressMode = \case
+        SingleChangeAddress -> AccountModeSingleAddress
+        IncreasingChangeAddresses -> AccountModeHD
+        SingleExternalAddress -> AccountModeHD
 
 getWalletAccountUtxoStatistics
     :: forall ctx s n k
@@ -1190,6 +1200,32 @@ getWalletAccountUtxoStatistics ctx (ApiT wid) (ApiT (DerivationIndex accountIxW)
                 accounts <- lift $ listWalletAccounts wrk
                 unless (accountIxW `elem` accounts)
                     $ throwE ErrGetAccountNotFound
+
+-- | Set the address-derivation mode for a specific account and return the
+-- updated account. Switches between HD (new change address per tx) and
+-- single-address (always reuse one change address) modes.
+putWalletAccountModeH
+    :: forall ctx s n k
+     . ( ctx ~ ApiLayer s
+       , s ~ SeqState n k
+       , k ~ ShelleyKey
+       , Excluding '[ByronKey, SharedKey] k
+       )
+    => ctx
+    -> ApiT WalletId
+    -> ApiT DerivationIndex
+    -> ApiSetAccountMode
+    -> Handler ApiAccount
+putWalletAccountModeH ctx (ApiT wid) idx@(ApiT (DerivationIndex accountIxW)) body = do
+    withWorkerCtx @_ @s ctx wid liftE liftE $ \wrk -> do
+        let accountIx = Index accountIxW :: Index 'Hardened 'AccountK
+            newMode = toChangeAddressMode (body ^. #mode)
+        liftIO $ setChangeAddressModeForAccount wrk accountIx newMode
+    getWalletAccount ctx (ApiT wid) idx
+  where
+    toChangeAddressMode = \case
+        AccountModeHD -> IncreasingChangeAddresses
+        AccountModeSingleAddress -> SingleChangeAddress
 
 listWalletAccountsH
     :: forall ctx s n k
@@ -1275,17 +1311,16 @@ postWalletAccountConsolidateH
        , WalletFlavor s
        , HasNetworkLayer IO ctx
        , Bounded (Index (AddressIndexDerivationType k) (AddressCredential k))
-       , PaymentAddress k 'CredFromKeyK
+       , DelegationAddress k 'CredFromKeyK
        , HasDelegation s
        )
     => ctx
     -> ApiT WalletId
     -> ApiT DerivationIndex
     -> ApiConsolidateRequest
-    -> Handler (ApiTransaction n)
+    -> Handler [ApiTransaction n]
 postWalletAccountConsolidateH ctx@ApiLayer{..} (ApiT wid) (ApiT (DerivationIndex accountIxW)) body =
     withWorkerCtx ctx wid liftE liftE $ \wrk -> do
-        liftIO $ hPutStrLn stderr "CONSOLIDATE_HANDLER: entry reached"
         let db = wrk ^. W.dbLayer
             tr = wrk ^. W.logger
             accountIx = Index accountIxW :: Index 'Hardened 'AccountK
@@ -1299,58 +1334,59 @@ postWalletAccountConsolidateH ctx@ApiLayer{..} (ApiT wid) (ApiT (DerivationIndex
         plan <- liftIO $ createAccountMigrationPlan wrk accountIx
         ttl <- liftIO $ W.transactionExpirySlot ti Nothing
         pp <- liftIO $ NW.currentProtocolParameters netLayer
-        addrs <- liftIO $ listAccountAddresses wrk (const Just) accountIx
-        outputAddresses <-
-            case NE.nonEmpty [a | (a, _, path) <- addrs, isExternal path] of
-                Nothing ->
-                    liftHandler $ throwE W.ErrCreateMigrationPlanEmpty
-                Just as -> pure as
-        selectionWithdrawals <-
-            liftHandler
-                $ failWith W.ErrCreateMigrationPlanEmpty
-                $ W.migrationPlanToSelectionWithdrawals plan NoWithdrawal outputAddresses
-        let (selection, _withdrawal) = NE.head selectionWithdrawals
-            mkRewardAccount = selfRewardAccountBuilder (keyFlavorFromState @s)
-            txContext =
-                defaultTransactionCtx
-                    { txValidityInterval = (Nothing, ttl)
-                    }
-            extraPathLookup addr = case accountSeqSt of
-                Nothing -> Nothing
-                Just st -> fst (isOurs addr st)
-        (tx, txMeta, txTime, sealedTx) <-
-            liftHandler
-                $ W.buildAndSignTransaction
-                    wrk
-                    wid
-                    mkRewardAccount
-                    pwd
-                    txContext
-                    (selection{change = []})
-                    extraPathLookup
-        liftHandler
-            $ W.submitTx tr db netLayer
-            $ BuiltTx{builtTx = tx, builtTxMeta = txMeta, builtSealedTx = sealedTx}
-        mkApiTransaction
-            ti
-            wrk
-            #pendingSince
-            MkApiTransactionParams
-                { txId = tx ^. #txId
-                , txFee = tx ^. #fee
-                , txInputs = NE.toList $ second Just <$> selection ^. #inputs
-                , txCollateralInputs = []
-                , txOutputs = tx ^. #outputs
-                , txCollateralOutput = tx ^. #collateralOutput
-                , txWithdrawals = tx ^. #withdrawals
-                , txMeta
-                , txMetadata = Nothing
-                , txTime
-                , txScriptValidity = tx ^. #scriptValidity
-                , txDeposit = W.stakeKeyDeposit pp
-                , txMetadataSchema = TxMetadataDetailedSchema
-                , txCBOR = tx ^. #txCBOR
-                }
+        addrs <- liftIO $ listAccountAddresses wrk normalizeDelegationAddress accountIx
+        -- If there are no external addresses, there's nothing to consolidate.
+        case NE.nonEmpty [a | (a, _, path) <- addrs, isExternal path] of
+            Nothing -> pure []
+            Just outputAddresses -> do
+                -- If the plan is empty the UTXOs are already consolidated.
+                case W.migrationPlanToSelectionWithdrawals plan NoWithdrawal outputAddresses of
+                    Nothing -> pure []
+                    Just selectionWithdrawals -> do
+                        let mkRewardAccount = selfRewardAccountBuilder (keyFlavorFromState @s)
+                            txContext =
+                                defaultTransactionCtx
+                                    { txValidityInterval = (Nothing, ttl)
+                                    }
+                            extraPathLookup addr = case accountSeqSt of
+                                Nothing -> Nothing
+                                Just st -> fst (isOurs addr st)
+                        -- Submit one transaction per selection batch; large wallets
+                        -- may require multiple rounds to consolidate all UTXOs.
+                        forM (NE.toList selectionWithdrawals) $ \(selection, _withdrawal) -> do
+                            (tx, txMeta, txTime, sealedTx) <-
+                                liftHandler
+                                    $ W.buildAndSignTransaction
+                                        wrk
+                                        wid
+                                        mkRewardAccount
+                                        pwd
+                                        txContext
+                                        (selection{change = []})
+                                        extraPathLookup
+                            liftHandler
+                                $ W.submitTx tr db netLayer
+                                $ BuiltTx{builtTx = tx, builtTxMeta = txMeta, builtSealedTx = sealedTx}
+                            mkApiTransaction
+                                ti
+                                wrk
+                                #pendingSince
+                                MkApiTransactionParams
+                                    { txId = tx ^. #txId
+                                    , txFee = tx ^. #fee
+                                    , txInputs = NE.toList $ second Just <$> selection ^. #inputs
+                                    , txCollateralInputs = []
+                                    , txOutputs = tx ^. #outputs
+                                    , txCollateralOutput = tx ^. #collateralOutput
+                                    , txWithdrawals = tx ^. #withdrawals
+                                    , txMeta
+                                    , txMetadata = Nothing
+                                    , txTime
+                                    , txScriptValidity = tx ^. #scriptValidity
+                                    , txDeposit = W.stakeKeyDeposit pp
+                                    , txMetadataSchema = TxMetadataDetailedSchema
+                                    , txCBOR = tx ^. #txCBOR
+                                    }
   where
     ti :: TimeInterpreter (ExceptT PastHorizonException IO)
     ti = timeInterpreter (ctx ^. networkLayer)
