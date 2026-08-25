@@ -401,9 +401,7 @@ createMigrationPlan w =
 
 listWalletAccounts
     :: forall w
-     . ( HasCallStack
-       , HasType (ApiT WalletId) w
-       )
+     . HasType (ApiT WalletId) w
     => w
     -> (Method, Text)
 listWalletAccounts w =
@@ -413,9 +411,7 @@ listWalletAccounts w =
 
 getWalletAccount
     :: forall w
-     . ( HasCallStack
-       , HasType (ApiT WalletId) w
-       )
+     . HasType (ApiT WalletId) w
     => w
     -> ApiT DerivationIndex
     -> (Method, Text)
@@ -426,9 +422,7 @@ getWalletAccount w idx =
 
 putWalletAccountMode
     :: forall w
-     . ( HasCallStack
-       , HasType (ApiT WalletId) w
-       )
+     . HasType (ApiT WalletId) w
     => w
     -> ApiT DerivationIndex
     -> (Method, Text)
@@ -439,9 +433,7 @@ putWalletAccountMode w idx =
 
 postWalletAccountConsolidate
     :: forall w
-     . ( HasCallStack
-       , HasType (ApiT WalletId) w
-       )
+     . HasType (ApiT WalletId) w
     => w
     -> ApiT DerivationIndex
     -> (Method, Text)
