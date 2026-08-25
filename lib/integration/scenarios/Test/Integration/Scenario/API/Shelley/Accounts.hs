@@ -19,8 +19,6 @@ import Cardano.Wallet.Api.Types
     , ApiAddressWithPath
     , ApiT (..)
     , ApiTransaction
-    , ApiWallet
-    , WalletStyle (..)
     )
 import Cardano.Wallet.Primitive.NetworkId
     ( HasSNetworkId (..)
@@ -152,6 +150,23 @@ spec = describe "SHELLEY_ACCOUNTS" $ do
                 , expectField #addressDerivationMode
                     (`shouldBe` AccountModeSingleAddress)
                 ]
+
+            -- 4b. The list-accounts endpoint must also reflect the new mode.
+            rList <-
+                request @[ApiAccount]
+                    ctx
+                    (Link.listWalletAccounts w)
+                    Default
+                    Empty
+            verify
+                rList
+                [ expectResponseCode HTTP.status200
+                ]
+            let accts = getResponse rList
+            liftIO $ length accts `shouldSatisfy` (>= 1)
+            liftIO
+                $ (head accts ^. #addressDerivationMode)
+                    `shouldBe` AccountModeSingleAddress
 
             -- 5. Mode must survive block application (simulates a restart):
             --    wait for more blocks to be processed via chain sync and

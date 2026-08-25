@@ -165,6 +165,7 @@ module Cardano.Wallet
     , selectionToUnsignedTx
     , readNodeTipStateForTxWrite
     , buildSignSubmitTransaction
+    , buildSignSubmitAccountTransaction
     , buildTransaction
     , buildAndSignTransaction
     , BuiltTx (..)
@@ -3159,6 +3160,246 @@ buildSignSubmitTransaction
             => Either (ErrBalanceTx era) ErrConstructTx
             -> WalletException
         wrapBalanceConstructError = either ExceptionBalanceTx ExceptionConstructTx
+
+-- | Like 'buildSignSubmitTransaction' but scoped to a specific wallet account.
+-- For account 0H (@minBound@) this delegates to 'buildSignSubmitTransaction'.
+-- For account N >= 1, coin selection is restricted to UTxOs owned by that
+-- account and key derivation paths are taken from the account's sequential
+-- state rather than the default (account 0H) state.
+buildSignSubmitAccountTransaction
+    :: forall s k
+     . ( HardDerivation k
+       , Bounded (Index (AddressIndexDerivationType k) (AddressCredential k))
+       , IsOurs s RewardAccount
+       , AddressBookIso s
+       , IsOurs s Address
+       , WalletFlavor s
+       , CredFromOf s ~ 'CredFromKeyK
+       , k ~ KeyOf s
+       , HasSNetworkId (NetworkOf s)
+       , Excluding '[SharedKey] k
+       )
+    => DBLayer IO s
+    -> NetworkLayer IO Read.ConsensusBlock
+    -> TransactionLayer k 'CredFromKeyK SealedTx
+    -> Passphrase "user"
+    -> WalletId
+    -> Index 'Hardened 'AccountK
+    -> ChangeAddressGen s
+    -> PreSelection
+    -> TransactionCtx
+    -> IO (BuiltTx, UTCTime)
+buildSignSubmitAccountTransaction
+    db@DBLayer{..}
+    netLayer
+    txLayer
+    pwd
+    walletId
+    accountIx
+    changeAddrGen
+    preSelection
+    txCtx
+    | accountIx == minBound =
+        buildSignSubmitTransaction db netLayer txLayer pwd walletId changeAddrGen preSelection txCtx
+    | otherwise = do
+        stdGen <- initStdGen
+        (Write.PParamsInAnyRecentEra _era protocolParams, timeTranslation) <-
+            readNodeTipStateForTxWrite netLayer
+        let ti = timeInterpreter netLayer
+        throwOnErr <=< runExceptT
+            $ withRootKey nullTracer db walletId pwd wrapRootKeyError
+            $ \case
+                RootKeyAccessV2 ekey _mPayload userPwd -> lift $ do
+                    let recentEra' = _era
+                        anyCardanoEra = case recentEra' of
+                            Write.RecentEraConway -> Read.EraValue Read.Conway
+                            Write.RecentEraDijkstra -> Read.EraValue Read.Dijkstra
+                    mAccountSeqSt <-
+                        atomically $ readSeqStateForAccount (getIndex accountIx)
+                    accountSeqSt <- case mAccountSeqSt of
+                        Nothing ->
+                            throwIO $ userError
+                                "buildSignSubmitAccountTransaction: account not found"
+                        Just st -> pure st
+                    (unsignedTx, wallet, slot) <- atomically $ do
+                        pendingTxs <-
+                            fmap fromTransactionInfo
+                                <$> readTransactions
+                                    Nothing
+                                    Descending
+                                    Range.everything
+                                    (Just Pending)
+                                    Nothing
+                                    Nothing
+                        ( throwOnErr
+                                <=< (Delta.onDBVar walletState . Delta.updateWithResultAndError)
+                            )
+                            $ \s -> do
+                                let wallet = WalletState.getLatest s
+                                    fullUtxo =
+                                        availableUTxO (Set.fromList pendingTxs) wallet
+                                    accountUtxo =
+                                        UTxO.filterByAddress
+                                            (isJust . fst . (`isOurs` accountSeqSt))
+                                            fullUtxo
+                                    fakeWallet = wallet{getState = accountSeqSt}
+                                buildTransactionPure @s
+                                    fakeWallet
+                                    timeTranslation
+                                    accountUtxo
+                                    changeAddrGen
+                                    protocolParams
+                                    preSelection
+                                    txCtx
+                                    & runExceptT
+                                        . withExceptT wrapBalanceConstructError
+                                    & (`evalRand` stdGen)
+                                    & fmap
+                                        ( \(tx, _newAccountSt) ->
+                                            -- Don't update main wallet prologue for extra
+                                            -- accounts — account state is managed by chain sync.
+                                            ( []
+                                            , (tx, wallet, currentTip wallet ^. #slotNo)
+                                            )
+                                        )
+                    let txBody = unsignedTx ^. bodyTxL
+                        walletUtxo = wallet ^. #utxo
+                        inputPaths =
+                            L.nub
+                                $ mapMaybe
+                                    ( \ledIn ->
+                                        UTxO.lookup
+                                            (toWallet ledIn)
+                                            walletUtxo
+                                            >>= \(TxOut addr _) ->
+                                                fst (isOurs addr accountSeqSt)
+                                    )
+                                    ( Set.toList
+                                        $ unsignedTx ^. bodyTxL . inputsTxBodyL
+                                    )
+                        mStakePath =
+                            case walletFlavor @s of
+                                ShelleyWallet ->
+                                    Just
+                                        $ stakeDerivationPath
+                                        $ Seq.derivationPrefix accountSeqSt
+                                _ -> Nothing
+                        needsStakeKey =
+                            isJust (view #txDelegationAction txCtx)
+                                || isJust (view #txVotingAction txCtx)
+                                || containsSelfWithdrawal (view #txWithdrawal txCtx)
+                        needsMinting = txBody ^. mintTxBodyL /= mempty
+                        mPolicyPath = case walletFlavor @s of
+                            ShelleyWallet | needsMinting -> Just policyDerivationPath
+                            _ -> Nothing
+                        allPaths =
+                            inputPaths
+                                <> case (needsStakeKey, mStakePath) of
+                                    (True, Just p) -> [p]
+                                    _ -> []
+                                <> maybeToList mPolicyPath
+                    witsE <-
+                        withDecryptedExtKeyMaterial ekey userPwd
+                            $ \rootKm -> do
+                                results <-
+                                    forM allPaths $ \path ->
+                                        withDerivedExtKeyMaterial
+                                            DerivationScheme2
+                                            rootKm
+                                            ( map getDerivationIndex
+                                                $ NE.toList path
+                                            )
+                                            $ fmap Right
+                                                . mkShelleyWitnessFromExtKeyMaterial
+                                                    recentEra'
+                                                    txBody
+                                pure $ sequence results
+                    shelleyWits <- case witsE of
+                        Left e ->
+                            error
+                                $ "buildSignSubmitAccountTransaction V2: "
+                                    <> show e
+                        Right wits -> pure wits
+                    let mExternalWit = case view #txWithdrawal txCtx of
+                            WithdrawalExternal _ _ _ extXPrv ->
+                                Just
+                                    $ mkShelleyWitnessLedger
+                                        recentEra'
+                                        txBody
+                                        (extXPrv, mempty)
+                            _ -> Nothing
+                        signedLedgerTx =
+                            unsignedTx
+                                & witsTxL
+                                    . addrTxWitsL
+                                    .~ Set.fromList
+                                        (shelleyWits <> maybeToList mExternalWit)
+                        builtSealedTx = sealWriteTx recentEra' signedLedgerTx
+                        rawTx =
+                            walletTx
+                                $ decodeTx txLayer anyCardanoEra builtSealedTx
+                        utxo' =
+                            applyOurTxToUTxO
+                                (Slot.at $ currentTip wallet ^. #slotNo)
+                                (currentTip wallet ^. #blockHeight)
+                                accountSeqSt
+                                rawTx
+                                walletUtxo
+                        builtTxMeta = case utxo' of
+                            Nothing ->
+                                error
+                                    "buildSignSubmitAccountTransaction V2: \
+                                    \Can't apply constructed transaction."
+                            Just ((_tx, appliedMeta), _, _) ->
+                                appliedMeta
+                                    { status = Pending
+                                    , expiry =
+                                        Just (snd $ txValidityInterval txCtx)
+                                    }
+                        resolveInputs_ =
+                            fmap (\(txIn, _) -> (txIn, UTxO.lookup txIn walletUtxo))
+                        txResolved =
+                            rawTx
+                                { resolvedInputs =
+                                    resolveInputs_ (resolvedInputs rawTx)
+                                , resolvedCollateralInputs =
+                                    resolveInputs_
+                                        (resolvedCollateralInputs rawTx)
+                                }
+                    let builtTx =
+                            BuiltTx
+                                { builtTx = txResolved
+                                , builtTxMeta
+                                , builtSealedTx
+                                }
+                    atomically
+                        $ Delta.onDBVar walletState
+                            . WalletState.updateSubmissions
+                            . Delta.update
+                        $ \_ -> Submissions.addTxSubmission builtTx slot
+                    postSealedTx netLayer builtSealedTx
+                        & throwWrappedErr wrapNetworkError
+                        & liftIO
+                    slotToUTCTime slot
+                        & interpretQuery
+                            (neverFails "slot is ahead of the node tip" ti)
+                        & fmap (builtTx,)
+                        & liftIO
+                RootKeyAccessV1{} ->
+                    liftIO
+                        $ throwIO
+                        $ userError
+                            "buildSignSubmitAccountTransaction: \
+                            \V1 keys not supported for extra accounts"
+  where
+    wrapRootKeyError = ExceptionWitnessTx . ErrWitnessTxWithRootKey
+    wrapNetworkError = ExceptionSubmitTx . ErrSubmitTxNetwork
+
+    wrapBalanceConstructError
+        :: Write.IsRecentEra era
+        => Either (ErrBalanceTx era) ErrConstructTx
+        -> WalletException
+    wrapBalanceConstructError = either ExceptionBalanceTx ExceptionConstructTx
 
 buildAndSignTransactionPure
     :: forall k s era

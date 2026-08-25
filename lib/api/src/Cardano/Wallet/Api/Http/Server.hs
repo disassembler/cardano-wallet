@@ -141,6 +141,7 @@ import Cardano.Wallet.Api.Http.Shelley.Server
     , listWalletAccountTransactionsH
     , listWalletAccountsH
     , postWalletAccountConsolidateH
+    , createWalletAccountTransactionH
     , putWalletAccountModeH
     , postAccountPublicKey
     , postAccountWallet
@@ -270,15 +271,11 @@ import Data.Text.Class
 import Network.Ntp
     ( NtpClient
     )
-import Control.Monad.Error.Class
-    ( throwError
-    )
 import Servant
     ( Handler (..)
     , NoContent (..)
     , Server
     , err400
-    , err501
     , (:<|>) (..)
     )
 import Servant.Server
@@ -341,7 +338,7 @@ server byron icarus shelley multisig spl drepLayer ntp blockchainSource =
             :<|> deleteWalletAccountH shelley
             :<|> listWalletAccountAddressesH shelley (normalizeDelegationAddress @_ @ShelleyKey @n)
             :<|> getWalletAccountUtxoStatistics shelley
-            :<|> (\_ _ _ -> throwError err501)
+            :<|> createWalletAccountTransactionH shelley (delegationAddressS @n)
             :<|> listWalletAccountTransactionsH shelley
             :<|> putWalletAccountModeH shelley
             :<|> postWalletAccountConsolidateH shelley
