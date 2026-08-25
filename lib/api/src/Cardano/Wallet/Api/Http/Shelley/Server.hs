@@ -1583,16 +1583,9 @@ mkShelleyWallet
        )
     => MkApiWallet ctx s ApiWallet
 mkShelleyWallet ctx@ApiLayer{..} wid cp meta delegation pending progress = do
-    (reward, extraBalance) <-
+    reward <-
         withWorkerCtx @_ @s ctx wid liftE liftE $ \wrk -> liftIO $ do
-            -- never fails - returns zero if balance not found
-            r <- W.fetchRewardBalance @s $ wrk ^. dbLayer
-            extraIdxs <- listWalletAccounts wrk
-            utxos <-
-                mapM
-                    (\w32 -> readAccountUTxO wrk (Index w32 :: Index 'Hardened 'AccountK))
-                    extraIdxs
-            return (r, foldMap UTxO.balance utxos)
+            W.fetchRewardBalance @s $ wrk ^. dbLayer
 
     let ti = timeInterpreter netLayer
 
@@ -1618,8 +1611,8 @@ mkShelleyWallet ctx@ApiLayer{..} wid cp meta delegation pending progress = do
             $ getWalletTip
                 (neverFails "getWalletTip wallet tip should be behind node tip" ti)
                 cp
-    let available = availableBalance pending cp `TokenBundle.add` extraBalance
-    let total = totalBalance pending reward cp `TokenBundle.add` extraBalance
+    let available = availableBalance pending cp
+    let total = totalBalance pending reward cp
     pure
         ApiWallet
             { addressPoolGap = ApiT $ getGap $ getState cp ^. #externalPool
