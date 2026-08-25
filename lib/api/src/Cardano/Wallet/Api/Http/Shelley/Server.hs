@@ -236,7 +236,7 @@ import Cardano.Wallet
     , listAccountAddresses
     , listAccountUtxoStatistics
     , listWalletAccounts
-    , readAccountUTxO
+
     , logger
     , manageRewardBalance
     , mkWalletBroadcastOps
