@@ -94,8 +94,6 @@ import Cardano.Wallet.Read
 import Control.Concurrent.QSem
     ( QSem
     , newQSem
-    , signalQSem
-    , waitQSem
     )
 import Control.Concurrent.STM
     ( TMVar
@@ -369,7 +367,7 @@ consumerLoop bc k ops fq rq active = do
                 actual <- wboRollback ops point
                 -- Discard forward entries that predate the rollback; they will
                 -- be re-delivered by the master after rollback acknowledgement.
-                atomically $ flushTQueue fq
+                _ <- atomically $ flushTQueue fq
                 -- Use putTMVar so fanOutRollback can observe thread death via
                 -- waitCatchSTM rather than blocking forever on a dead thread.
                 atomically $ putTMVar resultVar actual
@@ -385,8 +383,7 @@ consumerLoop bc k ops fq rq active = do
 
 -- | Build the 'ChainFollower' for the master sync thread.
 broadcasterFollower
-    :: Ord k
-    => Hash "Genesis"
+    :: Hash "Genesis"
     -> ChainBroadcaster k
     -> ChainFollower IO ChainPoint ChainTip (NonEmpty ConsensusBlock)
 broadcasterFollower genesisHash bc =
@@ -404,8 +401,7 @@ broadcasterFollower genesisHash bc =
 -- The UTxO index is updated atomically so subsequent blocks in the same batch
 -- see spend events correctly.  Returns as soon as all batches are enqueued.
 fanOutForward
-    :: Ord k
-    => Hash "Genesis"
+    :: Hash "Genesis"
     -> ChainBroadcaster k
     -> NonEmpty ConsensusBlock
     -> ChainTip
@@ -445,8 +441,7 @@ fanOutForward genesisHash bc cblocks tip = do
 -- 'race' fallback treats 'point' as the acknowledgement, so the master
 -- thread is never blocked indefinitely by a dead consumer.
 fanOutRollback
-    :: Ord k
-    => ChainBroadcaster k
+    :: ChainBroadcaster k
     -> ChainPoint
     -> IO ChainPoint
 fanOutRollback bc point = do
@@ -490,8 +485,7 @@ fanOutRollback bc point = do
 -- | Update the UTxO index for a batch of blocks.  Used by 'fanOutForward' to
 -- track which wallet owns which unspent output for spend detection.
 updateUtxoForBlocks
-    :: Ord k
-    => Map Address k
+    :: Map Address k
     -> Map TxIn k
     -> NonEmpty Block
     -> Map TxIn k
@@ -499,8 +493,7 @@ updateUtxoForBlocks addrIdx utxoIdx =
     foldl' (updateUtxoForBlock addrIdx) utxoIdx . NE.toList
 
 updateUtxoForBlock
-    :: Ord k
-    => Map Address k
+    :: Map Address k
     -> Map TxIn k
     -> Block
     -> Map TxIn k
@@ -537,8 +530,7 @@ readChainPointsForBroadcaster bc = do
 -- | Run the master sync loop, restarting automatically on node disconnect.
 -- Never returns unless the thread is cancelled.
 runMasterSync
-    :: Ord k
-    => NetworkLayer IO ConsensusBlock
+    :: NetworkLayer IO ConsensusBlock
     -> Tracer IO ChainFollowLog
     -> Hash "Genesis"
     -> ChainBroadcaster k

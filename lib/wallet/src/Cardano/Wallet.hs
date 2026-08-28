@@ -522,7 +522,6 @@ import Cardano.Wallet.Network
     )
 import Cardano.Wallet.Network.Broadcasting
     ( ChainBroadcaster (..)
-    , SubscriberState (..)
     , WalletBroadcastOps (..)
     , subscribe
     , unsubscribe
@@ -930,10 +929,7 @@ import Data.IORef
     , readIORef
     , writeIORef
     )
-import System.IO
-    ( hPutStrLn
-    , stderr
-    )
+
 import UnliftIO.Async
     ( waitCatch
     )
@@ -1008,7 +1004,7 @@ import qualified Cardano.Wallet.Primitive.Types as W
 import qualified Cardano.Wallet.Primitive.Types.Coin as Coin
 import qualified Cardano.Wallet.Primitive.Types.Range as Range
 import qualified Cardano.Wallet.Primitive.Types.TokenBundle as TokenBundle
-import qualified Data.Map.Strict as Map
+
 import qualified Cardano.Wallet.Primitive.Types.TokenMap as TokenMap
 import qualified Cardano.Wallet.Primitive.Types.Tx.TxOut as TxOut
 import qualified Cardano.Wallet.Primitive.Types.UTxO as UTxO

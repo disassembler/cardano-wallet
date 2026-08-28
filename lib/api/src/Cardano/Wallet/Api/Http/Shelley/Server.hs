@@ -1,5 +1,6 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# HLINT ignore "Use record patterns" #-}
+{-# OPTIONS_GHC -Wno-name-shadowing #-}
 -- TODO: https://cardanofoundation.atlassian.net/browse/ADP-2841
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE ConstraintKinds #-}
@@ -228,7 +229,6 @@ import Cardano.Wallet
     , TxSubmitLog
     , WalletWorkerLog (..)
     , addWalletAccount
-    , catchUpWallet
     , dbLayer
     , deleteWalletAccount
     , dummyChangeAddressGen
@@ -241,12 +241,10 @@ import Cardano.Wallet
 
     , logger
     , manageRewardBalance
-    , mkWalletBroadcastOps
     , networkLayer
     , readPrivateKey
     , readWallet
     , readWalletMeta
-    , rescanWallet
     , signTransactionV2
     , txWitnessTagForKey
     , walletSyncProgress
@@ -580,11 +578,8 @@ import Cardano.Wallet.Network
     , timeInterpreter
     )
 import Cardano.Wallet.Network.Broadcasting
-    ( ChainBroadcaster
-    , WalletBroadcastOps (..)
-    , newChainBroadcaster
+    ( newChainBroadcaster
     , runMasterSync
-    , subscribe
     , unsubscribe
     )
 import Cardano.Wallet.Network.RestorationMode
@@ -766,9 +761,6 @@ import Cardano.Wallet.Transaction
     , containsSelfWithdrawal
     , defaultTransactionCtx
     )
-import Cardano.Wallet.Unsafe
-    ( unsafeRunExceptT
-    )
 import Control.Arrow
     ( second
     , (&&&)
@@ -934,14 +926,12 @@ import System.Random
     ( randomRIO
     )
 import UnliftIO.Async
-    ( Async
-    , async
+    ( async
     , cancel
     , race_
     )
 import UnliftIO.STM
-    ( TVar
-    , atomically
+    ( atomically
     , modifyTVar'
     , newTVarIO
     , readTVar
