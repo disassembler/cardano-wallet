@@ -81,6 +81,9 @@ module Cardano.Wallet
     , readWallet
     , readPrivateKey
     , restoreWallet
+    , mkWalletBroadcastOps
+    , catchUpWallet
+    , rescanWallet
     , updateWallet
     , updateWalletPassphraseWithOldPassphrase
     , updateWalletPassphraseWithMnemonic
@@ -500,6 +503,13 @@ import Cardano.Wallet.Network
     , NetworkLayer (..)
     , mapChainFollower
     )
+import Cardano.Wallet.Network.Broadcasting
+    ( ChainBroadcaster (..)
+    , SubscriberState (..)
+    , WalletBroadcastOps (..)
+    , subscribe
+    , unsubscribe
+    )
 import Cardano.Wallet.Network.RestorationMode
     ( RestorationPoint (..)
     )
@@ -660,6 +670,7 @@ import Cardano.Wallet.Primitive.Types.Tx.TxOut
     )
 import Cardano.Wallet.Primitive.Types.UTxO
     ( UTxO (..)
+    , dom
     )
 import Cardano.Wallet.Primitive.Types.UTxOStatistics
     ( UTxOStatistics
@@ -827,6 +838,7 @@ import Data.Maybe
     , fromMaybe
     , isJust
     , isNothing
+    , listToMaybe
     , mapMaybe
     , maybeToList
     )
@@ -889,12 +901,37 @@ import Statistics.Quantile
     ( medianUnbiased
     , quantiles
     )
+import Control.Concurrent
+    ( threadDelay
+    )
+import Control.Concurrent.QSem
+    ( waitQSem
+    , signalQSem
+    )
+import Data.IORef
+    ( newIORef
+    , readIORef
+    , writeIORef
+    )
+import System.IO
+    ( hPutStrLn
+    , stderr
+    )
+import UnliftIO.Async
+    ( waitCatch
+    )
 import UnliftIO.Exception
     ( Exception
+    , SomeException
+    , bracket_
     , catch
     , evaluate
+    , fromException
+    , isSyncException
     , throwIO
+    , try
     )
+import qualified UnliftIO.STM as STM
 import UnliftIO.MVar
     ( modifyMVar_
     , newMVar
@@ -954,6 +991,7 @@ import qualified Cardano.Wallet.Primitive.Types as W
 import qualified Cardano.Wallet.Primitive.Types.Coin as Coin
 import qualified Cardano.Wallet.Primitive.Types.Range as Range
 import qualified Cardano.Wallet.Primitive.Types.TokenBundle as TokenBundle
+import qualified Data.Map.Strict as Map
 import qualified Cardano.Wallet.Primitive.Types.TokenMap as TokenMap
 import qualified Cardano.Wallet.Primitive.Types.Tx.TxOut as TxOut
 import qualified Cardano.Wallet.Primitive.Types.UTxO as UTxO
@@ -1428,6 +1466,203 @@ restoreWallet ctx =
 newtype UncheckErrNoSuchWallet = UncheckErrNoSuchWallet ErrNoSuchWallet
     deriving (Eq, Show)
 instance Exception UncheckErrNoSuchWallet
+
+-- | Build the type-erased broadcaster callbacks for a wallet.
+-- The resulting 'WalletBroadcastOps' captures all wallet-specific state
+-- via closure; the broadcaster sees only opaque 'IO' actions.
+mkWalletBroadcastOps
+    :: ( IsOurs s Address
+       , IsOurs s RewardAccount
+       , AddressBookIso s
+       , KnownAddresses s
+       )
+    => WalletLayer IO s
+    -> WalletBroadcastOps
+mkWalletBroadcastOps ctx =
+    WalletBroadcastOps
+        { wboRollForward = \wblocks tip -> do
+            -- wblocks are already W.Block (conversion done once in master)
+            -- If the first block's parent doesn't match our current tip (fork),
+            -- roll back to the common ancestor before applying.
+            let mParentHash = parentHeaderHash (header (NE.head wblocks))
+            cp0 <- db & \DBLayer{..} -> atomically readCheckpoint
+            unless (Just (headerHash (currentTip cp0)) == mParentHash) $ do
+                checkpoints <- db & \DBLayer{..} -> atomically listCheckpoints
+                let ancestorPt = case mParentHash of
+                        Nothing -> ChainPointAtGenesis
+                        Just ph -> fromMaybe ChainPointAtGenesis
+                            $ listToMaybe
+                            $ filter (\case
+                                ChainPointAtGenesis -> False
+                                ChainPoint _ h     -> h == ph)
+                            checkpoints
+                _ <- rollbackBlocks ctx (toSlot ancestorPt)
+                pure ()
+            let hasTxs = any (not . null . transactions) (NE.toList wblocks)
+            restoreBlocks ctx (contramap MsgWalletFollow tr) (List wblocks) tip
+            if hasTxs then getAddrs else pure []
+        , wboRollback = \readPt -> do
+            actualPt <- rollbackBlocks ctx (toSlot (toWalletChainPoint readPt))
+            pure (fromWalletChainPoint actualPt)
+        , wboCheckpoints = do
+            walletPts <- db & \DBLayer{..} -> atomically listCheckpoints
+            pure (map fromWalletChainPoint walletPts)
+        , wboAddresses = getAddrs
+        , wboUTxOKeys = do
+            cp <- db & \DBLayer{..} -> atomically readCheckpoint
+            pure $ Set.toList (dom (cp ^. #utxo))
+        }
+  where
+    db = ctx ^. dbLayer
+    tr = ctx ^. logger
+    getAddrs = do
+        cp <- db & \DBLayer{..} -> atomically readCheckpoint
+        pure $ map (\(a, _, _) -> a) $ knownAddresses (getState cp)
+
+-- | Sentinel exception thrown internally when the catch-up thread has
+-- processed the master tip block and is ready to activate the consumer.
+data CatchUpDone = CatchUpDone
+    deriving (Show)
+instance Exception CatchUpDone
+
+-- | Subscribe to the broadcaster first (to start buffering live blocks), then
+-- open a dedicated 'chainSync' connection to replay history up to the master's
+-- current tip, and finally activate the consumer so it drains from that tip
+-- onwards.  This eliminates the catch-up→subscribe hand-off race: the consumer
+-- always starts from exactly @masterTip+1@, which is a valid continuation.
+--
+-- On node disconnect or any unexpected error, 'unsubscribe' is called and the
+-- whole process retries after a short delay.
+catchUpWallet
+    :: ( IsOurs s Address
+       , IsOurs s RewardAccount
+       , AddressBookIso s
+       , KnownAddresses s
+       , MaybeLight s
+       )
+    => WalletLayer IO s
+    -> ChainBroadcaster WalletId
+    -> WalletId
+    -> IO ()
+catchUpWallet ctx bc wid = do
+    (mMasterBlockNo, active, fq, consumerThread)
+        <- subscribe bc wid (mkWalletBroadcastOps ctx)
+    case mMasterBlockNo of
+        Nothing -> do
+            -- Master hasn't seen any blocks yet; consumer can start immediately.
+            STM.atomically (STM.writeTVar active True)
+            monitorAndRestartConsumer consumerThread
+        Just masterBlockNo -> do
+            lastAppliedHashRef <- newIORef Nothing
+            let sem = bcCatchUpSemaphore bc
+            result <- bracket_ (waitQSem sem) (signalQSem sem)
+                $ (try (chainSync nw nullTracer $ mapChainFollower
+                fromWalletChainPoint
+                toWalletChainPoint
+                id
+                id
+                ChainFollower
+                    { checkpointPolicy = CP.defaultPolicy
+                    , readChainPoints = db & \DBLayer{..} -> atomically listCheckpoints
+                    , rollForward = \blocks tip -> do
+                        let wblocks = fst . fromCardanoBlock genesisHash
+                                <$> NE.toList blocks
+                            blockNoOf b =
+                                Read.BlockNo
+                                    $ fromIntegral
+                                    $ getQuantity
+                                    $ (header b) ^. #blockHeight
+                            -- Apply only blocks up to masterBlockNo to avoid
+                            -- overlapping with what the consumer will replay.
+                            toApply = takeWhile
+                                (\b -> blockNoOf b <= masterBlockNo)
+                                wblocks
+                            shouldStop = any
+                                (\b -> blockNoOf b >= masterBlockNo)
+                                wblocks
+                        case NE.nonEmpty toApply of
+                            Just ne -> do
+                                restoreBlocks ctx
+                                    (contramap MsgWalletFollow tr)
+                                    (List ne) tip
+                                writeIORef lastAppliedHashRef
+                                    $ Just $ headerHash $ header $ NE.last ne
+                            Nothing -> pure ()
+                        when shouldStop $ throwIO CatchUpDone
+                    , rollBackward = rollbackBlocks ctx . toSlot
+                    }) :: IO (Either SomeException ()))
+            case result of
+                Left e | Just CatchUpDone <- fromException e -> do
+                    activateWithDrain lastAppliedHashRef fq active
+                    monitorAndRestartConsumer consumerThread
+                Left _ -> do
+                    unsubscribe bc wid
+                    threadDelay 1000000
+                    catchUpWallet ctx bc wid
+                Right () -> do
+                    -- chainSync returned normally (e.g. already at masterTip)
+                    activateWithDrain lastAppliedHashRef fq active
+                    monitorAndRestartConsumer consumerThread
+  where
+    db = ctx ^. dbLayer
+    nw = ctx ^. networkLayer
+    tr = ctx ^. logger
+    (_block0, NetworkParameters{genesisParameters = gp}) = ctx ^. genesisData
+    genesisHash = W.getGenesisBlockHash gp
+
+    -- Drain stale forward-queue entries before activating the consumer.
+    -- After catch-up applies blocks up to masterBlockNo, the forward queue may
+    -- contain re-delivered blocks (due to rollback+reforward during catch-up).
+    -- We discard all entries up to (but not including) the first entry whose
+    -- first block is a valid continuation of the last block catch-up applied.
+    activateWithDrain lastAppliedHashRef fq active = do
+        mLastHash <- readIORef lastAppliedHashRef
+        STM.atomically $ do
+            case mLastHash of
+                Nothing -> pure ()
+                Just lastHash -> do
+                    entries <- drainTQueue fq
+                    let fresh = dropWhile
+                            (\(batch, _) ->
+                                parentHeaderHash (header (NE.head batch))
+                                    /= Just lastHash)
+                            entries
+                    mapM_ (STM.writeTQueue fq) fresh
+            STM.writeTVar active True
+
+    drainTQueue q = go []
+      where
+        go acc = STM.tryReadTQueue q >>= \case
+            Nothing -> pure (reverse acc)
+            Just x  -> go (x : acc)
+
+    -- After activating a consumer, wait for it to finish using the thread
+    -- handle returned by 'subscribe'.  This avoids a double-restart race:
+    -- if a concurrent 'subscribe' call replaces our consumer with a new one,
+    -- 'waitCatch consumerThread' returns 'Left AsyncCancelled' (because our
+    -- consumer was cancelled), 'isSyncException' is False, and we exit cleanly
+    -- rather than spawning a second restart.
+    monitorAndRestartConsumer consumerThread = do
+        eResult <- waitCatch consumerThread
+        case eResult of
+            Right () -> pure ()
+            Left e
+                | isSyncException e -> do
+                    unsubscribe bc wid
+                    threadDelay 1000000
+                    catchUpWallet ctx bc wid
+                | otherwise -> pure ()
+
+-- | Roll back a wallet's chain state to genesis so that a fresh catch-up
+-- thread can replay the entire chain from scratch.
+--
+-- The API layer is responsible for cancelling any in-flight catch-up thread,
+-- unsubscribing from the broadcaster, and launching a new catch-up thread via
+-- 'startCatchUpOrSubscribe' after this returns.
+rescanWallet :: WalletLayer IO s -> IO ()
+rescanWallet ctx = do
+    _ <- rollbackBlocks ctx (toSlot ChainPointAtGenesis)
+    pure ()
 
 {- NOTE [CheckedExceptionsAndCallbacks]
 

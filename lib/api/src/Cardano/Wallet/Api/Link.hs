@@ -41,6 +41,7 @@ module Cardano.Wallet.Api.Link
     , getWallet
     , listWallets
     , postWallet
+    , postWalletRescan
     , putWallet
     , putWalletPassphrase
     , getWalletUtxoSnapshot
@@ -258,6 +259,15 @@ deleteWallet w =
         (endpoint @Api.DeleteWallet (wid &))
         (endpoint @Api.DeleteByronWallet (wid &))
         (endpoint @Api.DeleteSharedWallet (wid &))
+  where
+    wid = w ^. typed @(ApiT WalletId)
+
+postWalletRescan
+    :: forall w
+     . HasType (ApiT WalletId) w
+    => w
+    -> (Method, Text)
+postWalletRescan w = endpoint @Api.PostWalletRescan (wid &)
   where
     wid = w ^. typed @(ApiT WalletId)
 

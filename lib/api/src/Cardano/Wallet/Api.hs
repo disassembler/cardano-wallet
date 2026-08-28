@@ -27,6 +27,7 @@ module Cardano.Wallet.Api
     , GetWallet
     , ListWallets
     , PostWallet
+    , PostWalletRescan
     , PutWallet
     , PutWalletPassphrase
     , GetUTxOsStatistics
@@ -258,6 +259,9 @@ import Cardano.Wallet.Flavor
 import Cardano.Wallet.Network
     ( NetworkLayer
     )
+import Cardano.Wallet.Network.Broadcasting
+    ( ChainBroadcaster
+    )
 import Cardano.Wallet.Pools
     ( StakePool
     )
@@ -320,12 +324,22 @@ import Data.Kind
 import Data.List.NonEmpty
     ( NonEmpty
     )
+import Data.Map.Strict
+    ( Map
+    )
+import UnliftIO.Async
+    ( Async
+    )
+import UnliftIO.STM
+    ( TVar
+    )
 import GHC.Generics
     ( Generic
     )
 import Servant.API
     ( Capture
     , JSON
+    , NoContent (..)
     , OctetStream
     , QueryFlag
     , QueryParam
@@ -391,6 +405,7 @@ type Wallets =
         :<|> GetWallet
         :<|> ListWallets
         :<|> PostWallet
+        :<|> PostWalletRescan
         :<|> PutWallet
         :<|> PutWalletPassphrase
         :<|> GetWalletUtxoSnapshot
@@ -418,6 +433,15 @@ type PostWallet =
     "wallets"
         :> ReqBody '[JSON] (PostData ApiWallet)
         :> PostCreated '[JSON] ApiWallet
+
+-- | Trigger a full rescan of a Shelley wallet from genesis.
+-- The wallet's chain state is rolled back to genesis and a fresh
+-- catch-up thread is launched.
+type PostWalletRescan =
+    "wallets"
+        :> Capture "walletId" (ApiT WalletId)
+        :> "rescan"
+        :> PostAccepted '[JSON] NoContent
 
 -- | https://cardano-foundation.github.io/cardano-wallet/api/#operation/putWallet
 type PutWallet =
@@ -1398,6 +1422,11 @@ data ApiLayer s
     , _workerRegistry :: WorkerRegistry WalletId (DBLayer IO s)
     , concierge :: Concierge IO WalletLock
     , _tokenMetadataClient :: TokenMetadataClient IO
+    , _chainBroadcaster :: ChainBroadcaster WalletId
+    -- ^ Shared master chain-sync broadcaster; all wallets subscribe here.
+    , _catchUpRegistry :: TVar (Map WalletId (Async ()))
+    -- ^ Active per-wallet catch-up threads, keyed for cancellation on
+    -- wallet delete or rescan.
     }
     deriving (Generic)
 
@@ -1411,7 +1440,7 @@ instance HasWorkerCtx (DBLayer IO s) (ApiLayer s) where
     type WorkerCtx (ApiLayer s) = WalletLayer IO s
     type WorkerMsg (ApiLayer s) = WalletWorkerLog
     type WorkerKey (ApiLayer s) = WalletId
-    hoistResource db transform (ApiLayer _ tr gp nw tl _ _ _ _) =
+    hoistResource db transform (ApiLayer _ tr gp nw tl _ _ _ _ _ _) =
         WalletLayer (contramap transform tr) gp nw tl db
 
 {-------------------------------------------------------------------------------

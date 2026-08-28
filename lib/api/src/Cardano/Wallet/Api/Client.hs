@@ -291,6 +291,7 @@ walletClient =
             :<|> _getWallet
             :<|> _listWallets
             :<|> _postWallet
+            :<|> _postWalletRescan
             :<|> _putWallet
             :<|> _putWalletPassphrase
             :<|> _getWalletUtxoSnapshot

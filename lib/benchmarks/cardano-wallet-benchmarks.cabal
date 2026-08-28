@@ -178,6 +178,18 @@ benchmark latency
     , wai-middleware-logging
     , with-utf8
 
+benchmark broadcast
+  import:         language, opts-exe
+  type:           exitcode-stdio-1.0
+  hs-source-dirs: exe
+  main-is:        broadcast-bench.hs
+  build-depends:
+    , base
+    , containers
+    , criterion
+    , unliftio
+    , unliftio-core
+
 benchmark db
   import:         language, opts-exe
   type:           exitcode-stdio-1.0
@@ -248,6 +260,44 @@ benchmark api
     , text
     , time
     , with-utf8
+
+executable chain-sync-bench
+  import:         language, opts-exe
+  hs-source-dirs: exe
+  main-is:        chain-sync-bench.hs
+  build-depends:
+    , base
+    , cardano-wallet-api
+    , cardano-wallet-benchmarks
+    , cardano-wallet-integration:framework
+    , cardano-wallet-primitive
+    , http-types
+    , local-cluster
+    , pathtype
+    , resourcet
+    , text
+    , time
+    , unliftio
+
+executable chain-sync-flood-bench
+  import:         language, opts-exe
+  hs-source-dirs: exe
+  main-is:        chain-sync-flood-bench.hs
+  build-depends:
+    , aeson
+    , base
+    , cardano-wallet-api
+    , cardano-wallet-benchmarks
+    , cardano-wallet-integration:framework
+    , cardano-wallet-primitive
+    , generic-lens
+    , http-types
+    , local-cluster
+    , pathtype
+    , resourcet
+    , text
+    , time
+    , unliftio
 
 benchmark read-blocks
   import:           language, opts-exe

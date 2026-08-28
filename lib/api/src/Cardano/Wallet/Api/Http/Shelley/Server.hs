@@ -78,6 +78,7 @@ module Cardano.Wallet.Api.Http.Shelley.Server
     , postTransactionFeeOld
     , postTrezorWallet
     , postWallet
+    , postWalletRescan
     , postShelleyWallet
     , postAccountWallet
     , putByronWalletPassphrase
@@ -214,15 +215,18 @@ import Cardano.Wallet
     , Percentile (..)
     , TxSubmitLog
     , WalletWorkerLog (..)
+    , catchUpWallet
     , dbLayer
     , dummyChangeAddressGen
     , genesisData
     , getCurrentEpochSlotting
     , logger
     , manageRewardBalance
+    , mkWalletBroadcastOps
     , networkLayer
     , readPrivateKey
     , readWalletMeta
+    , rescanWallet
     , signTransactionV2
     , txWitnessTagForKey
     )
@@ -544,6 +548,14 @@ import Cardano.Wallet.Network
     , fetchRewardAccountBalances
     , timeInterpreter
     )
+import Cardano.Wallet.Network.Broadcasting
+    ( ChainBroadcaster
+    , WalletBroadcastOps (..)
+    , newChainBroadcaster
+    , runMasterSync
+    , subscribe
+    , unsubscribe
+    )
 import Cardano.Wallet.Network.RestorationMode
     ( RestorationMode (RestoreFromGenesis)
     , RestorationPoint (..)
@@ -633,6 +645,9 @@ import Cardano.Wallet.Primitive.Types.DRep
     , DRepScriptHash (..)
     , DRepSummary (..)
     , encodeDRepIDBech32
+    )
+import Cardano.Wallet.Primitive.Types.GenesisParameters
+    ( GenesisParameters (..)
     )
 import Cardano.Wallet.Primitive.Types.Hash
     ( Hash (..)
@@ -887,7 +902,19 @@ import System.Random
     ( randomRIO
     )
 import UnliftIO.Async
-    ( race_
+    ( Async
+    , async
+    , cancel
+    , race_
+    )
+import UnliftIO.STM
+    ( TVar
+    , atomically
+    , modifyTVar'
+    , newTVarIO
+    , readTVar
+    , readTVarIO
+    , writeTVar
     )
 import UnliftIO.Concurrent
     ( threadDelay
@@ -1101,6 +1128,7 @@ postAccountWallet
        , Seq.SupportsDiscovery n k
        , HasWorkerRegistry s ctx
        , IsOurs s RewardAccount
+       , KnownAddresses s
        , MaybeLight s
        , AddressBookIso s
        , WalletFlavor s
@@ -1642,6 +1670,7 @@ postLegacyWallet
        , KnownDiscovery s
        , IsOurs s RewardAccount
        , IsOurs s Address
+       , KnownAddresses s
        , MaybeLight s
        , HasNetworkLayer IO ctx
        , k ~ KeyOf s
@@ -1952,6 +1981,14 @@ deleteWallet ctx (ApiT wid) = do
         (const $ pure ())
         (const $ pure ())
 
+    -- Cancel any active catch-up thread before unregistering.
+    liftIO $ do
+        catchUpMap <- readTVarIO catchUpReg
+        mapM_ cancel (Map.lookup wid catchUpMap)
+        atomically $ modifyTVar' catchUpReg (Map.delete wid)
+    -- Unsubscribe from the master broadcaster immediately so block delivery
+    -- stops before the worker thread is torn down.
+    liftIO $ unsubscribe bc wid
     liftIO $ Registry.unregister re wid
     liftIO $ removeDatabase df wid
 
@@ -1959,6 +1996,43 @@ deleteWallet ctx (ApiT wid) = do
   where
     re = ctx ^. workerRegistry @s
     df = ctx ^. dbFactory @s
+    bc = _chainBroadcaster ctx
+    catchUpReg = _catchUpRegistry ctx
+
+-- | Roll back the wallet to genesis, cancel any in-flight catch-up thread, and
+-- start a fresh catch-up so the wallet replays the full chain history.
+postWalletRescan
+    :: forall ctx s
+     . ( ctx ~ ApiLayer s
+       , IsOurs s Address
+       , IsOurs s RewardAccount
+       , AddressBookIso s
+       , KnownAddresses s
+       , MaybeLight s
+       )
+    => ctx
+    -> ApiT WalletId
+    -> Handler NoContent
+postWalletRescan ctx (ApiT wid) = do
+    -- Cancel any in-flight catch-up and unsubscribe FIRST so that no
+    -- concurrent writer is touching the wallet DB when rescanWallet rolls
+    -- back to genesis.  Doing the rollback while the consumer is still
+    -- running would race with wboRollForward and produce a double-restart.
+    liftIO $ do
+        mOld <- atomically $ do
+            m <- readTVar catchUpReg
+            writeTVar catchUpReg (Map.delete wid m)
+            pure (Map.lookup wid m)
+        mapM_ cancel mOld
+        unsubscribe bc wid
+    -- Safe to roll back now; no concurrent writers.
+    withWorkerCtx @_ @s ctx wid liftE liftE $ \wctx -> liftIO $ do
+        W.rescanWallet wctx
+    liftIO $ startCatchUpOrSubscribe ctx wid
+    return NoContent
+  where
+    bc = _chainBroadcaster ctx
+    catchUpReg = _catchUpRegistry ctx
 
 getWallet
     :: forall ctx s apiWallet
@@ -5845,6 +5919,7 @@ newApiLayer
        , IsOurs s RewardAccount
        , IsOurs s Address
        , AddressBookIso s
+       , KnownAddresses s
        , MaybeLight s
        , k ~ KeyOf s
        )
@@ -5862,7 +5937,14 @@ newApiLayer tr g0 nw tl df tokenMeta coworker = do
     let trTx = contramap MsgSubmitSealedTx tr
     let trW = contramap MsgWalletWorker tr
     locks <- Concierge.newConcierge
-    let ctx = ApiLayer trTx trW g0 nw tl df re locks tokenMeta
+    bc <- newChainBroadcaster
+    catchUpReg <- newTVarIO mempty
+    let ctx = ApiLayer trTx trW g0 nw tl df re locks tokenMeta bc catchUpReg
+    let (_, NetworkParameters{genesisParameters = gp}) = g0
+        genesisHash = getGenesisBlockHash gp
+    -- Start the master sync thread.  It runs for the lifetime of the service
+    -- and restarts automatically on node disconnect.
+    void $ async $ runMasterSync nw nullTracer genesisHash bc
     listDatabases df >>= mapM_ (startWalletWorker ctx coworker)
     return ctx
 
@@ -5873,6 +5955,7 @@ startWalletWorker
        , IsOurs s RewardAccount
        , IsOurs s Address
        , AddressBookIso s
+       , KnownAddresses s
        , MaybeLight s
        )
     => ctx
@@ -5880,8 +5963,11 @@ startWalletWorker
     -- ^ Action to run concurrently with restore
     -> WalletId
     -> IO ()
-startWalletWorker ctx coworker wid =
+startWalletWorker ctx coworker wid = do
     void $ registerWorker ctx acquire coworker wid
+    -- After the worker is registered, decide whether the wallet needs catch-up
+    -- or can subscribe to the master broadcaster directly.
+    startCatchUpOrSubscribe ctx wid
   where
     acquire :: forall a. (DBLayer IO s -> IO a) -> IO a
     acquire action =
@@ -5899,6 +5985,7 @@ createWalletWorker
        , IsOurs s RewardAccount
        , IsOurs s Address
        , AddressBookIso s
+       , KnownAddresses s
        , MaybeLight s
        )
     => ctx
@@ -5917,7 +6004,11 @@ createWalletWorker ctx wid createWallet coworker =
         Nothing ->
             liftIO (registerWorker ctx acquire coworker wid) >>= \case
                 Nothing -> throwE ErrCreateWalletFailedToCreateWorker
-                Just _ -> pure wid
+                Just _ -> do
+                    -- New wallets start at genesis; always need catch-up before
+                    -- subscribing to the master broadcaster.
+                    liftIO $ startCatchUpOrSubscribe ctx wid
+                    pure wid
   where
     acquire :: forall a. (DBLayer IO s -> IO a) -> IO a
     acquire action = do
@@ -5966,10 +6057,6 @@ createNonRestoringWalletWorker ctx wid createWallet =
 registerWorker
     :: forall ctx s
      . ( ctx ~ ApiLayer s
-       , IsOurs s RewardAccount
-       , IsOurs s Address
-       , AddressBookIso s
-       , MaybeLight s
        )
     => ctx
     -> (forall a. (DBLayer IO s -> IO a) -> IO a)
@@ -5987,16 +6074,56 @@ registerWorker ctx acquire coworker wid =
             { workerAcquire = acquire
             , workerBefore = \_ _ -> pure ()
             , workerAfter = defaultWorkerAfter
-            , -- fixme: ADP-641 Review error handling here
+            , -- Block delivery is handled by the master broadcaster thread
+              -- via 'WalletBroadcastOps' callbacks.  The worker only handles
+              -- local TX submission and any coworker action.
               workerMain = \ctx' _ ->
                 race_
-                    (unsafeRunExceptT $ W.restoreWallet ctx')
-                    ( race_
-                        (forever $ W.runLocalTxSubmissionPool txCfg ctx')
-                        (coworker ctx' wid)
-                    )
+                    (forever $ W.runLocalTxSubmissionPool txCfg ctx')
+                    (coworker ctx' wid)
             }
     txCfg = W.defaultLocalTxSubmissionConfig
+
+-- | Decide whether a wallet should catch up independently or subscribe
+-- directly to the master broadcaster.
+--
+-- Launches an async catch-up thread (stored in '_catchUpRegistry') that calls
+-- 'W.catchUpWallet'.  When catch-up reaches tip the wallet subscribes to the
+-- master broadcaster automatically via 'W.catchUpWallet'.
+startCatchUpOrSubscribe
+    :: forall ctx s
+     . ( ctx ~ ApiLayer s
+       , IsOurs s Address
+       , IsOurs s RewardAccount
+       , AddressBookIso s
+       , KnownAddresses s
+       , MaybeLight s
+       )
+    => ctx
+    -> WalletId
+    -> IO ()
+startCatchUpOrSubscribe ctx wid =
+    Registry.lookup re wid >>= \case
+        Nothing -> pure ()
+        Just wrk -> do
+            let wctx = hoistResource (workerResource wrk) (MsgFromWorker wid) ctx
+            -- Cancel any existing catch-up before launching a new one.
+            -- Two concurrent callers can still both start threads, but the
+            -- monitorAndRestartConsumer fix in catchUpWallet handles that:
+            -- the "loser" thread's consumer gets cancelled by the "winner"'s
+            -- subscribe call, waitCatch returns Left AsyncCancelled, and the
+            -- loser exits cleanly without a double-restart.
+            mOld <- atomically $ do
+                m <- readTVar catchUpReg
+                writeTVar catchUpReg (Map.delete wid m)
+                pure (Map.lookup wid m)
+            mapM_ cancel mOld
+            t <- async $ W.catchUpWallet wctx bc wid
+            atomically $ modifyTVar' catchUpReg (Map.insert wid t)
+  where
+    re = ctx ^. workerRegistry @s
+    bc = _chainBroadcaster ctx
+    catchUpReg = _catchUpRegistry ctx
 
 -- | Something to pass as the coworker action to 'newApiLayer', which does
 -- nothing, and never exits.

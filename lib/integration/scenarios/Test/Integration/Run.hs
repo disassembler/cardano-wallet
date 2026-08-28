@@ -74,6 +74,7 @@ import qualified Test.Integration.Scenario.API.Shared.Addresses as SharedAddress
 import qualified Test.Integration.Scenario.API.Shared.Transactions as SharedTransactions
 import qualified Test.Integration.Scenario.API.Shared.Wallets as SharedWallets
 import qualified Test.Integration.Scenario.API.Shelley.Addresses as Addresses
+import qualified Test.Integration.Scenario.API.Shelley.ChainSync as ChainSync
 import qualified Test.Integration.Scenario.API.Shelley.CoinSelections as CoinSelections
 import qualified Test.Integration.Scenario.API.Shelley.HWWallets as HWWallets
 import qualified Test.Integration.Scenario.API.Shelley.Migrations as Migrations
@@ -116,6 +117,7 @@ main = withTestsSetup $ \testDir (tr, tracers) -> do
                     Blocks.spec
                     ByronAddresses.spec @n
                     ByronCoinSelections.spec @n
+                    ChainSync.spec
                     Wallets.spec @n
                     SharedWallets.spec @n
                     SharedAddresses.spec @n
