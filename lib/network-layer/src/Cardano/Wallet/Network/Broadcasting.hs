@@ -113,6 +113,7 @@ import Control.Monad
     , forM_
     , forever
     , void
+    , when
     )
 import Control.Tracer
     ( Tracer
@@ -155,7 +156,6 @@ import UnliftIO.STM
     , newTVarIO
     , readTQueue
     , readTVar
-    , readTVarIO
     , writeTQueue
     , writeTVar
     )
@@ -518,9 +518,17 @@ updateUtxoForBlock addrIdx utxoIdx0 block =
 
 -- | Collect the union of all subscriber checkpoints for Ouroboros
 -- intersection negotiation.
+--
+-- Blocks until at least one subscriber has registered. Without this guard the
+-- master would negotiate with an empty checkpoint list, the node would respond
+-- with a rollback to Genesis, and any wallet that subscribed in the interim
+-- would receive that rollback — crashing with ErrNoOlderCheckpoint Origin.
 readChainPointsForBroadcaster :: ChainBroadcaster k -> IO [ChainPoint]
 readChainPointsForBroadcaster bc = do
-    subs <- readTVarIO (bcSubscribers bc)
+    subs <- atomically $ do
+        s <- readTVar (bcSubscribers bc)
+        when (Map.null s) retry
+        pure s
     allPoints <- concat <$> mapM (wboCheckpoints . ssOps) (Map.elems subs)
     pure (nub allPoints)
 

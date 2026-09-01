@@ -224,6 +224,9 @@ import Data.DBVar
 import Data.Generics.Internal.VL.Lens
     ( (^.)
     )
+import Control.Applicative
+    ( (<|>)
+    )
 import Data.Maybe
     ( catMaybes
     , fromMaybe
@@ -813,7 +816,17 @@ mkDBLayerCollection ti wid atomically_ walletState =
             Delta.onDBVar walletState
                 $ Delta.updateWithResult
                 $ \wal ->
-                    case findNearestPoint wal requestedPoint of
+                    let checkpointMap = wal ^. #checkpoints . #checkpoints
+                        -- When a real block at slot 0 replaces the genesis
+                        -- checkpoint in the DB, Origin is absent after restart.
+                        -- Fall back to the oldest available checkpoint so a
+                        -- node-requested rollback to genesis doesn't crash.
+                        mNearestPoint =
+                            findNearestPoint wal requestedPoint
+                                <|> case requestedPoint of
+                                    Origin -> fst <$> Map.lookupMin checkpointMap
+                                    _ -> Nothing
+                    in case mNearestPoint of
                         Nothing -> throw $ ErrNoOlderCheckpoint wid requestedPoint
                         Just nearestPoint ->
                             let nearestSlotNo = case nearestPoint of
@@ -829,7 +842,7 @@ mkDBLayerCollection ti wid atomically_ walletState =
                                     ]
                                 , case Map.lookup
                                     nearestPoint
-                                    (wal ^. #checkpoints . #checkpoints) of
+                                    checkpointMap of
                                     Nothing ->
                                         error
                                             "rollbackTo_: \
