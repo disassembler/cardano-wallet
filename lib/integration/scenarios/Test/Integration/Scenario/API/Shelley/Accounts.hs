@@ -327,3 +327,95 @@ spec = describe "SHELLEY_ACCOUNTS" $ do
             liftIO $ finalBal1H `shouldSatisfy` (< sendAmt)
             -- 1H has something left (sendAmt - returnAmt - fee > 0)
             liftIO $ finalBal1H `shouldSatisfy` (> 0)
+
+    it
+        "ACCOUNTS_03 - Send 10 ADA from account 0H to 1H, verify receipt, \
+        \send funds back"
+        $ \ctx -> runResourceT $ do
+            -- Seed account 0H with 12 ADA (plenty for 10 ADA send + fees).
+            w <- fixtureWalletWith @n ctx [12_000_000]
+
+            -- 1. Create account 1H.
+            rPost1H <-
+                request @ApiAccount ctx (Link.postWalletAccount w) Default
+                    (Json [json|{"account_index": "1H", "passphrase": #{fixturePassphrase}}|])
+            verify rPost1H [expectResponseCode HTTP.status201]
+
+            -- 2. Get 1H's receive address.
+            rAddrs1H <-
+                request @[ApiAddressWithPath n] ctx
+                    (Link.listWalletAccountAddresses w acct1H) Default Empty
+            verify rAddrs1H [expectResponseCode HTTP.status200]
+            let addr1H = (getResponse rAddrs1H !! 0) ^. #id
+
+            -- 3. Send 10 ADA from 0H to 1H.
+            let sendAmt = 10_000_000 :: Natural
+            rSend <-
+                request @(ApiTransaction n) ctx
+                    (Link.createWalletAccountTransaction w acct0H) Default
+                    (Json [json|{
+                        "payments": [{
+                            "address": #{addr1H},
+                            "amount": {"quantity": #{sendAmt}, "unit": "lovelace"}
+                        }],
+                        "passphrase": #{fixturePassphrase}
+                    }|])
+            verify rSend [expectResponseCode HTTP.status202]
+            liftIO $ waitForTxImmutability ctx
+
+            -- 4. Verify 1H received exactly 10 ADA.
+            eventually "1H balance is 10 ADA" $ do
+                rAcct1H <-
+                    request @ApiAccount ctx
+                        (Link.getWalletAccount w acct1H) Default Empty
+                verify rAcct1H
+                    [ expectResponseCode HTTP.status200
+                    , expectField
+                        (#balance . #available . #toNatural)
+                        (`shouldBe` sendAmt)
+                    ]
+
+            -- 5. Get 0H's receive address for the return transfer.
+            rAddrs0H <-
+                request @[ApiAddressWithPath n] ctx
+                    (Link.listWalletAccountAddresses w acct0H) Default Empty
+            verify rAddrs0H [expectResponseCode HTTP.status200]
+            let addr0H = (getResponse rAddrs0H !! 0) ^. #id
+
+            -- 6. Send funds back: 5 ADA from 1H to 0H. Sending 9 would leave
+            --    only ~0.8 ADA change which is below the minimum UTXO value,
+            --    causing the wallet to produce no change output. 5 ADA leaves
+            --    ~4.8 ADA change which is safely above the minimum.
+            let returnAmt = 5_000_000 :: Natural
+            rReturn <-
+                request @(ApiTransaction n) ctx
+                    (Link.createWalletAccountTransaction w acct1H) Default
+                    (Json [json|{
+                        "payments": [{
+                            "address": #{addr0H},
+                            "amount": {"quantity": #{returnAmt}, "unit": "lovelace"}
+                        }],
+                        "passphrase": #{fixturePassphrase}
+                    }|])
+            verify rReturn [expectResponseCode HTTP.status202]
+            liftIO $ waitForTxImmutability ctx
+
+            -- 7. Verify 1H balance decreased and 0H balance recovered.
+            eventually "balances settle after return transfer" $ do
+                rFinal0H <-
+                    request @ApiAccount ctx
+                        (Link.getWalletAccount w acct0H) Default Empty
+                rFinal1H <-
+                    request @ApiAccount ctx
+                        (Link.getWalletAccount w acct1H) Default Empty
+                verify rFinal0H [expectResponseCode HTTP.status200]
+                verify rFinal1H [expectResponseCode HTTP.status200]
+                let bal0H =
+                        getFromResponse (#balance . #available . #toNatural) rFinal0H
+                    bal1H =
+                        getFromResponse (#balance . #available . #toNatural) rFinal1H
+                -- 0H should have recovered at least the return amount minus fees.
+                liftIO $ bal0H `shouldSatisfy` (>= returnAmt - 1_000_000)
+                -- 1H spent returnAmt so balance < sendAmt, but still has some left.
+                liftIO $ bal1H `shouldSatisfy` (< sendAmt)
+                liftIO $ bal1H `shouldSatisfy` (> 0)

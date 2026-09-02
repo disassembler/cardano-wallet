@@ -552,10 +552,12 @@ import Cardano.Wallet.Primitive.Model
     , applyOurTxToUTxO
     , availableUTxO
     , currentTip
+    , discoverFromBlockData
     , firstHeader
     , getState
     , initWallet
     , totalUTxO
+    , utxo
     )
 import Cardano.Wallet.Primitive.NetworkId
     ( HasSNetworkId (..)
@@ -626,6 +628,7 @@ import Cardano.Wallet.Primitive.Types.Block
     )
 import Cardano.Wallet.Primitive.Types.BlockSummary
     ( ChainEvents
+    , toAscBlockEvents
     )
 import Cardano.Wallet.Primitive.Types.Coin
     ( Coin (..)
@@ -929,7 +932,6 @@ import Data.IORef
     , readIORef
     , writeIORef
     )
-
 import UnliftIO.Async
     ( waitCatch
     )
@@ -1784,8 +1786,59 @@ restoreBlocks ctx tr blocks nodeTip =
 
             finalitySlot = nodeTipSlotNo - stabilityWindowShelley slottingParams
 
-            -- Checkpoint deltas
-            wcps = snd . fromWallet <$> cps
+            deltaPruneCheckpoints wallet =
+                pruneCheckpoints
+                    (view $ #currentTip . #blockHeight)
+                    epochStability
+                    (localTip ^. #blockHeight)
+                    (wallet ^. #checkpoints)
+
+        -- Discover UTxO entries for extra accounts from this block batch.
+        -- Account 0 is handled by 'applyBlocks' above; additional accounts
+        -- (index > 0) need their own discovery pass so their received outputs
+        -- are reflected in the global wallet UTxO.
+        (cpsFixed, extraPrologueDeltas) <- do
+            allIdxs <- listSeqAccounts
+            let extraIdxs = filter (/= 0) allIdxs
+            let lastCp = NE.last cps
+            extraResults <- forM extraIdxs $ \ix -> do
+                mExtraSt <- readSeqStateForAccount ix
+                case mExtraSt of
+                    Nothing -> pure (ix, Nothing, mempty :: UTxO, mempty :: UTxO)
+                    Just extraSt0 -> do
+                        (extraChainEvents, extraSt1) <-
+                            liftIO $ discoverFromBlockData blocks extraSt0
+                        let extraBlockEvents = toAscBlockEvents extraChainEvents
+                            -- Use cp0 (pre-batch checkpoint from DB) to find this account's
+                            -- UTxO before the current block batch. Using lastCp (post-applyBlocks)
+                            -- is wrong: applyBlocks removes UTxO entries whose TxIns appear as
+                            -- tx inputs, even when those entries belong to a different account.
+                            isAcctAddr addr = isJust . fst $ isOurs addr extraSt0
+                            acctCurrentUTxO = UTxO.filterByAddress isAcctAddr (utxo cp0)
+                            acctNewUTxO = foldl' applyBE acctCurrentUTxO extraBlockEvents
+                            applyBE u be =
+                                let sl = be ^. #slot
+                                    bh = be ^. #blockHeight
+                                in foldl' (applyOneTx sl bh) u (be ^. #transactions)
+                            applyOneTx sl bh u tx = case applyOurTxToUTxO sl bh extraSt1 tx u of
+                                Nothing -> u
+                                Just (_, _, u') -> u'
+                        pure (ix, Just (getPrologue extraSt1), acctCurrentUTxO, acctNewUTxO)
+            let -- Remove each account's old UTxO from the checkpoint, add its new UTxO.
+                -- This correctly handles both receiving new outputs and spending existing ones.
+                allOldExtraUTxOs = mconcat [old | (_, _, old, _) <- extraResults]
+                allNewExtraUTxOs = mconcat [new | (_, _, _, new) <- extraResults]
+                lastCpFixed = lastCp
+                    { utxo = UTxO.difference (utxo lastCp) allOldExtraUTxOs
+                        <> allNewExtraUTxOs
+                    }
+            pure
+                ( NE.fromList $ L.init (NE.toList cps) ++ [lastCpFixed]
+                , [InsertExtraPrologue ix p | (ix, Just p, _, _) <- extraResults]
+                )
+
+        -- Checkpoint deltas computed from the extra-UTxO-augmented checkpoints.
+        let wcps = snd . fromWallet <$> cpsFixed
             deltaPutCheckpoints =
                 extendCheckpoints
                     getSlot
@@ -1793,13 +1846,6 @@ restoreBlocks ctx tr blocks nodeTip =
                     epochStability
                     nodeTipBlockNo
                     wcps
-
-            deltaPruneCheckpoints wallet =
-                pruneCheckpoints
-                    (view $ #currentTip . #blockHeight)
-                    epochStability
-                    (localTip ^. #blockHeight)
-                    (wallet ^. #checkpoints)
 
         liftIO $ forM_ txs $ \(Tx{txCBOR = mcbor}, _) ->
             forM_ mcbor $ \cbor -> do
@@ -1825,11 +1871,12 @@ restoreBlocks ctx tr blocks nodeTip =
         -- fields (e.g. changeAddressMode) that may have been updated
         -- independently of block application.
         Delta.onDBVar walletState $ Delta.update $ \wallet ->
-            let newPrologue = getPrologue $ getState $ NE.last cps
+            let newPrologue = getPrologue $ getState $ NE.last cpsFixed
                 mergedPrologue = mergeUserSettings (wallet ^. #prologue) newPrologue
             in  [ReplacePrologue mergedPrologue]
                 <> [UpdateCheckpoints deltaPutCheckpoints]
                 <> deltaPruneSubmissions
+                <> extraPrologueDeltas
 
         Delta.onDBVar walletState $ Delta.update $ \wallet ->
             [UpdateCheckpoints $ deltaPruneCheckpoints wallet]
@@ -5262,9 +5309,6 @@ addWalletAccount ctx accountIx pwd =
     db & \DBLayer{..} -> do
         -- Account 0H is the default account, always stored separately; refuse it here.
         when (accountIx == minBound) $ throwE ErrAddAccountDuplicate
-        existing <- lift $ atomically listSeqAccounts
-        when (accountIxW `elem` existing)
-            $ throwE ErrAddAccountDuplicate
         withRootKey tr db walletId_ pwd ErrAddAccountWithRootKey $ \case
             RootKeyAccessV1 rootXPrv scheme ->
                 let encPwd = preparePassphrase scheme pwd
@@ -5275,10 +5319,14 @@ addWalletAccount ctx accountIx pwd =
                             (RootCredentials rootXPrv encPwd)
                             defaultAddressPoolGap
                             IncreasingChangeAddresses
-                in  lift
-                        $ onWalletState ctx
-                        $ update
-                        $ \_ -> [InsertExtraPrologue accountIxW (SeqPrologue seqState)]
+                -- Duplicate check and write are atomic to prevent restoreBlocks
+                -- from seeing stale listSeqAccounts between the two operations.
+                in  ExceptT $ atomically $ do
+                        existing <- listSeqAccounts
+                        if accountIxW `elem` existing
+                            then pure (Left ErrAddAccountDuplicate)
+                            else Right () <$ onDBVar walletState
+                                    (update $ \_ -> [InsertExtraPrologue accountIxW (SeqPrologue seqState)])
             RootKeyAccessV2 ekey _ userPwd -> do
                 let deriveKey path =
                         foldM
@@ -5317,10 +5365,14 @@ addWalletAccount ctx accountIx pwd =
                             defaultAddressPoolGap
                             IncreasingChangeAddresses
                         & #derivationPrefix .~ DerivationPrefix (purposeCIP1852, coinTypeAda, accountIx)
-                lift
-                    $ onWalletState ctx
-                    $ update
-                    $ \_ -> [InsertExtraPrologue accountIxW (SeqPrologue seqState)]
+                -- Duplicate check and write are atomic to prevent restoreBlocks
+                -- from seeing stale listSeqAccounts between the two operations.
+                ExceptT $ atomically $ do
+                    existing <- listSeqAccounts
+                    if accountIxW `elem` existing
+                        then pure (Left ErrAddAccountDuplicate)
+                        else Right () <$ onDBVar walletState
+                                (update $ \_ -> [InsertExtraPrologue accountIxW (SeqPrologue seqState)])
   where
     db = ctx ^. dbLayer
     tr = contramap MsgWallet (logger_ ctx)
