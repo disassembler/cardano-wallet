@@ -50,13 +50,16 @@ import Cardano.Mnemonic
     ( SomeMnemonic (..)
     )
 import Cardano.Wallet
-    ( ErrUpdatePassphrase (..)
+    ( ErrChainContinuityUnrecoverable (..)
+    , ErrChainNotContinuation (..)
+    , ErrUpdatePassphrase (..)
     , ErrWithRootKey (..)
     , InitialState (..)
     , LocalTxSubmissionConfig (..)
     , RootKeyAccess (..)
     , SelectionWithoutChange
     , WalletLayer (..)
+    , WalletWorkerLog (..)
     , dbLayer
     , migrationPlanToSelectionWithdrawals
     , readPrivateKey
@@ -165,6 +168,7 @@ import Cardano.Wallet.Primitive.Passphrase.Types
     )
 import Cardano.Wallet.Primitive.Types
     ( ActiveSlotCoefficient (..)
+    , BlockHeader (BlockHeader)
     , NetworkParameters (..)
     , SlotNo (..)
     , SlottingParameters (..)
@@ -480,6 +484,49 @@ spec = describe "Cardano.WalletSpec" $ do
         $ do
             let wid = WalletId (hash @ByteString "arbitrary")
             it (show $ ErrWithRootKeyWrongPassphrase wid ErrWrongPassphrase) True
+
+    describe "chain continuity recovery" $ do
+        let dummyHeader slot =
+                BlockHeader
+                    (SlotNo slot)
+                    (Quantity 0)
+                    (Hash "00000000000000000000000000000000")
+                    Nothing
+        it "ErrChainNotContinuation has a Show instance" $ do
+            let err =
+                    ErrChainNotContinuation
+                        { continuationStoredTip = dummyHeader 0
+                        , continuationIncoming = dummyHeader 1
+                        }
+            show err `shouldSatisfy` (not . null)
+        it "ErrChainContinuityUnrecoverable has a Show instance" $ do
+            show ErrChainContinuityUnrecoverable `shouldSatisfy` (not . null)
+        it "MsgChainContinuityRecovery has a non-empty ToText" $ do
+            let msg =
+                    MsgChainContinuityRecovery
+                        (dummyHeader 1)
+                        (dummyHeader 2)
+                        (SlotNo 0)
+            toText msg `shouldSatisfy` (not . T.null)
+        it "MsgChainContinuityUnrecoverable has a non-empty ToText" $ do
+            let msg =
+                    MsgChainContinuityUnrecoverable
+                        (dummyHeader 1)
+                        (dummyHeader 2)
+            toText msg `shouldSatisfy` (not . T.null)
+        it "MsgChainContinuityRecovery mentions the target slot" $ do
+            let msg =
+                    MsgChainContinuityRecovery
+                        (dummyHeader 5)
+                        (dummyHeader 99)
+                        (SlotNo 0)
+            toText msg `shouldSatisfy` T.isInfixOf "slot"
+        it "MsgChainContinuityUnrecoverable mentions rescan endpoint" $ do
+            let msg =
+                    MsgChainContinuityUnrecoverable
+                        (dummyHeader 5)
+                        (dummyHeader 99)
+            toText msg `shouldSatisfy` T.isInfixOf "rescan"
 
     describe "WalletLayer works as expected" $ do
         it

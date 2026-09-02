@@ -66,7 +66,8 @@ import Cardano.Wallet.Primitive.SyncProgress
     ( SyncProgress (..)
     )
 import Cardano.Wallet.Primitive.Types
-    ( walletNameMaxLength
+    ( WalletId
+    , walletNameMaxLength
     , walletNameMinLength
     )
 import Cardano.Wallet.Primitive.Types.Address
@@ -2208,6 +2209,53 @@ spec = describe "SHELLEY_WALLETS" $ do
         expectResponseCode HTTP.status404 r
         decodeErrorInfo r
             `shouldBe` NoSuchWallet (ApiErrorNoSuchWallet (w ^. #id))
+
+    -- -------------------------------------------------------------------------
+    -- Rescan tests (WALLETS_RESCAN_*)
+    -- -------------------------------------------------------------------------
+
+    it "WALLETS_RESCAN_01 - 404 for unknown wallet" $ \ctx -> runResourceT $ do
+        -- Use a well-formed but non-existent wallet ID.
+        let fakeWid = unsafeFromText "1111111111111111111111111111111111111111"
+        r <-
+            request @ApiWallet
+                ctx
+                (Link.postWalletRescan @'Shelley (ApiT fakeWid))
+                Default
+                Empty
+        expectResponseCode HTTP.status404 r
+        decodeErrorInfo r
+            `shouldBe` NoSuchWallet (ApiErrorNoSuchWallet (ApiT fakeWid))
+
+    it "WALLETS_RESCAN_02 - 202 and wallet eventually returns to ready"
+        $ \ctx -> runResourceT $ do
+            w <- emptyWallet ctx
+            -- Wait for initial sync to complete.
+            eventually "Wallet is ready before rescan" $ do
+                rg <-
+                    request @ApiWallet
+                        ctx
+                        (Link.getWallet @'Shelley w)
+                        Default
+                        Empty
+                expectField (#state . #getApiT) (`shouldBe` Ready) rg
+            -- Trigger the rescan.
+            r <-
+                request @ApiWallet
+                    ctx
+                    (Link.postWalletRescan @'Shelley w)
+                    Default
+                    Empty
+            expectResponseCode HTTP.status202 r
+            -- The wallet should eventually sync back to ready.
+            eventually "Wallet returns to ready after rescan" $ do
+                rg <-
+                    request @ApiWallet
+                        ctx
+                        (Link.getWallet @'Shelley w)
+                        Default
+                        Empty
+                expectField (#state . #getApiT) (`shouldBe` Ready) rg
 
     it
         "WALLETS_NETWORK_SHELLEY - Wallet has the same tip as network/information"

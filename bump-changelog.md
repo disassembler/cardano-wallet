@@ -1,3 +1,16 @@
+# Wallet changelog entries
+
+- **Fixed**: Wallet workers now automatically recover from chain continuity
+  errors by rolling back to the deepest available checkpoint (or genesis) and
+  retrying, rather than crashing permanently with an unrecoverable IOError.
+
+- **Added**: `POST /v2/wallets/{walletId}/rescan` endpoint to force a full
+  wallet re-index from genesis. Key material and wallet metadata are preserved;
+  UTxO, transaction history, and address discovery state are rebuilt from
+  genesis. The operation is asynchronous and returns HTTP 202 immediately.
+
+---
+
 # Ecosystem changelog — `cardano-node` 11.0.1 → 11.1.0
 
 Produced per `cardano-deps` §3 as the unified view of ecosystem changes behind

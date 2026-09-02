@@ -93,6 +93,7 @@ module Cardano.Wallet
     , manageRewardBalance
     , manageSharedRewardBalance
     , rollbackBlocks
+    , rescanWallet
     , checkWalletIntegrity
     , mkExternalWithdrawal
     , mkSelfWithdrawal
@@ -111,6 +112,8 @@ module Cardano.Wallet
     , ErrFetchRewards (..)
     , ErrCheckWalletIntegrity (..)
     , ErrWalletNotResponding (..)
+    , ErrChainNotContinuation (..)
+    , ErrChainContinuityUnrecoverable (..)
     , ErrReadRewardAccount (..)
     , ErrReadPolicyPublicKey (..)
     , ErrWritePolicyPublicKey (..)
@@ -724,6 +727,7 @@ import Control.Monad
     , join
     , replicateM
     , unless
+    , void
     , when
     , (<=<)
     )
@@ -1399,30 +1403,86 @@ restoreWallet ctx =
             readChainPoints = atomically listCheckpoints
             rollBackward = rollbackBlocks ctx . toSlot
             rollForward' = restoreBlocks ctx (contramap MsgWalletFollow tr)
-        in  catchFromIO
-                $ chainSync nw (contramap MsgChainFollow tr)
-                $ mapChainFollower
-                    fromWalletChainPoint
-                    toWalletChainPoint
-                    id
-                    id
-                    ChainFollower
-                        { checkpointPolicy
-                        , readChainPoints
-                        , rollForward = \blocks tip ->
-                            rollForward'
-                                ( List
-                                    $ fst . fromCardanoBlock (W.getGenesisBlockHash gp)
-                                        <$> blocks
-                                )
-                                tip
-                        , rollBackward
-                        }
+            runSync =
+                chainSync nw (contramap MsgChainFollow tr)
+                    $ mapChainFollower
+                        fromWalletChainPoint
+                        toWalletChainPoint
+                        id
+                        id
+                        ChainFollower
+                            { checkpointPolicy
+                            , readChainPoints
+                            , rollForward = \blocks tip ->
+                                rollForward'
+                                    ( List
+                                        $ fst
+                                            . fromCardanoBlock
+                                                (W.getGenesisBlockHash gp)
+                                            <$> blocks
+                                    )
+                                    tip
+                            , rollBackward
+                            }
+        in  catchFromIO $ recoverContinuityError runSync
   where
     db = ctx ^. dbLayer
     nw = ctx ^. networkLayer
     tr = ctx ^. logger
     (_block0, NetworkParameters{genesisParameters = gp}) = ctx ^. genesisData
+
+    recoverContinuityError :: IO () -> IO ()
+    recoverContinuityError runSync =
+        runSync
+            `catch` \(ErrChainNotContinuation stored incoming) -> do
+                -- Step 1: roll back to deepest checkpoint in rolling window
+                cps <-
+                    db & \DBLayer{..} -> atomically listCheckpoints
+                let target1 = case reverse (map toSlot cps) of
+                        (deepest : _) -> deepest
+                        [] -> toSlot ChainPointAtGenesis
+                    target1SlotNo = case target1 of
+                        At sl -> sl
+                        Origin -> SlotNo 0
+                void $ rollbackBlocks ctx target1
+                traceWith tr
+                    $ MsgChainContinuityRecovery stored incoming target1SlotNo
+                runSync
+                    `catch` \(ErrChainNotContinuation{}) -> do
+                        -- Step 2: roll back to genesis
+                        void
+                            $ rollbackBlocks ctx (toSlot ChainPointAtGenesis)
+                        -- Fast-fail if the genesis checkpoint's stored hash
+                        -- doesn't match what the genesis file declares. Starting
+                        -- another full chain-sync session here would block for
+                        -- minutes waiting for the first RollForward only to hit
+                        -- the same mismatch again, keeping the worker alive
+                        -- (and APIs degraded) far longer than necessary.
+                        cpAtGenesis <-
+                            db & \DBLayer{..} -> atomically readCheckpoint
+                        let storedGenesisHash =
+                                headerHash $ currentTip cpAtGenesis
+                            expectedGenesisHash = W.getGenesisBlockHash gp
+                        if storedGenesisHash /= expectedGenesisHash
+                            then do
+                                traceWith tr
+                                    $ MsgChainContinuityUnrecoverable
+                                        stored
+                                        incoming
+                                throwIO ErrChainContinuityUnrecoverable
+                            else do
+                                traceWith tr
+                                    $ MsgChainContinuityRecovery
+                                        stored
+                                        incoming
+                                        (SlotNo 0)
+                                runSync
+                                    `catch` \(ErrChainNotContinuation s i) -> do
+                                        traceWith tr
+                                            $ MsgChainContinuityUnrecoverable
+                                                s
+                                                i
+                                        throwIO ErrChainContinuityUnrecoverable
 
     catchFromIO :: IO a -> ExceptT ErrNoSuchWallet IO a
     catchFromIO m =
@@ -1475,6 +1535,12 @@ rollbackBlocks ctx point =
   where
     db = ctx ^. dbLayer
 
+-- | Roll back the wallet to genesis so the worker can replay the full chain.
+-- Call this before restarting the wallet worker via the registry.
+rescanWallet :: WalletLayer IO s -> IO ()
+rescanWallet ctx =
+    void $ rollbackBlocks ctx (toSlot ChainPointAtGenesis)
+
 -- | Apply the given blocks to the wallet and update the wallet state,
 -- transaction history and corresponding metadata.
 --
@@ -1496,15 +1562,12 @@ restoreBlocks ctx tr blocks nodeTip =
         slottingParams <- liftIO $ currentSlottingParameters nl
         cp0 <- readCheckpoint
         unless (cp0 `isParentOf` firstHeader blocks)
-            $ fail
-            $ T.unpack
-            $ T.unwords
-                [ "restoreBlocks: given chain isn't a valid continuation."
-                , "Wallet is at:"
-                , pretty (currentTip cp0)
-                , "but the given chain continues starting from:"
-                , pretty (firstHeader blocks)
-                ]
+            $ liftIO
+            $ throwIO
+            $ ErrChainNotContinuation
+                { continuationStoredTip = currentTip cp0
+                , continuationIncoming = firstHeader blocks
+                }
 
         -- TODO on concurrency:
         -- In light-mode, 'applyBlocks' may take some time to retrieve
@@ -5047,6 +5110,23 @@ newtype ErrWalletNotResponding
     = ErrWalletNotResponding WalletId
     deriving (Eq, Show)
 
+-- | Thrown when the presented chain isn't a valid continuation of the
+-- wallet's stored checkpoint.
+data ErrChainNotContinuation = ErrChainNotContinuation
+    { continuationStoredTip :: BlockHeader
+    , continuationIncoming :: BlockHeader
+    }
+    deriving (Show)
+
+instance Exception ErrChainNotContinuation
+
+-- | Thrown when chain continuity cannot be recovered even after rolling back
+-- to genesis (indicates wrong network or irrecoverable DB state).
+data ErrChainContinuityUnrecoverable = ErrChainContinuityUnrecoverable
+    deriving (Show)
+
+instance Exception ErrChainContinuityUnrecoverable
+
 data ErrCreateRandomAddress
     = ErrIndexAlreadyExists (Index 'Hardened 'CredFromKeyK)
     | ErrCreateAddrWithRootKey ErrWithRootKey
@@ -5156,6 +5236,10 @@ data WalletWorkerLog
     = MsgWallet WalletLog
     | MsgWalletFollow WalletFollowLog
     | MsgChainFollow ChainFollowLog
+    | -- | storedTip, incomingBlock, rollbackTarget
+      MsgChainContinuityRecovery BlockHeader BlockHeader SlotNo
+    | -- | storedTip, incomingBlock that also failed after genesis rollback
+      MsgChainContinuityUnrecoverable BlockHeader BlockHeader
     deriving (Show, Eq)
 
 instance ToText WalletWorkerLog where
@@ -5163,6 +5247,29 @@ instance ToText WalletWorkerLog where
         MsgWallet msg -> toText msg
         MsgWalletFollow msg -> toText msg
         MsgChainFollow msg -> toText msg
+        MsgChainContinuityRecovery stored incoming target ->
+            T.unwords
+                [ "Chain continuity error detected."
+                , "Stored tip:"
+                , pretty stored
+                , "Incoming:"
+                , pretty incoming
+                , "Rolling back to slot"
+                , T.pack (show target)
+                , "and retrying."
+                ]
+        MsgChainContinuityUnrecoverable stored incoming ->
+            T.unwords
+                [ "Chain continuity error is unrecoverable"
+                , "(wrong network?)."
+                , "Stored tip:"
+                , pretty stored
+                , "Incoming:"
+                , pretty incoming
+                , "Wallet worker halting."
+                , "Use POST /v2/wallets/{wid}/rescan"
+                , "to force a full reset."
+                ]
 
 instance HasPrivacyAnnotation WalletWorkerLog
 
@@ -5171,6 +5278,8 @@ instance HasSeverityAnnotation WalletWorkerLog where
         MsgWallet msg -> getSeverityAnnotation msg
         MsgWalletFollow msg -> getSeverityAnnotation msg
         MsgChainFollow msg -> getSeverityAnnotation msg
+        MsgChainContinuityRecovery{} -> Warning
+        MsgChainContinuityUnrecoverable{} -> Error
 
 -- | Log messages arising from the restore and follow process.
 data WalletFollowLog

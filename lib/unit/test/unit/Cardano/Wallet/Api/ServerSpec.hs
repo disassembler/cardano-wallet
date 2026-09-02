@@ -14,6 +14,9 @@ import Cardano.Ledger.BaseTypes
 import Cardano.Slotting.Slot
     ( EpochNo (..)
     )
+import Cardano.Wallet.Api.Http.Server.Error
+    ( ErrRescanAlreadyRunning (..)
+    )
 import Cardano.Wallet.Api.Http.Shelley.Server
     ( IsServerError (..)
     , depositReturnedFromCertificates
@@ -347,6 +350,20 @@ errorHandlingSpec = describe "liftHandler and toServerError" $ do
             `shouldBe` "Not Found"
         BL.toStrict (errBody actualErr)
             `shouldSatisfy` (B8.isInfixOf "no_such_wallet")
+        errHeaders actualErr
+            `shouldBe` [("Content-Type", "application/json;charset=utf-8")]
+
+    it "ErrRescanAlreadyRunning" $ do
+        let wid = unsafeFromText "0000000000000000000000000000000000000000"
+            handler :: ExceptT ErrRescanAlreadyRunning IO ()
+            handler = throwE $ ErrRescanAlreadyRunning wid
+        res <- testWalletHandler handler
+        res `shouldSatisfy` isLeft
+        let Left actualErr = res
+        errHTTPCode actualErr `shouldBe` 409
+        errReasonPhrase actualErr `shouldBe` "Conflict"
+        BL.toStrict (errBody actualErr)
+            `shouldSatisfy` (B8.isInfixOf "rescan_already_running")
         errHeaders actualErr
             `shouldBe` [("Content-Type", "application/json;charset=utf-8")]
 

@@ -294,7 +294,8 @@ walletClient =
             :<|> _putWallet
             :<|> _putWalletPassphrase
             :<|> _getWalletUtxoSnapshot
-            :<|> _getWalletUtxoStatistics =
+            :<|> _getWalletUtxoStatistics
+            :<|> _ =
                 client (Proxy @("v2" :> Wallets))
     in
         WalletClient

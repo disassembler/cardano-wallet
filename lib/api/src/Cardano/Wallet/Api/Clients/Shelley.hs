@@ -143,7 +143,8 @@ deleteWallet
     :<|> putWallet
     :<|> putWalletPassphrase
     :<|> getWalletUtxoSnapshot
-    :<|> getWalletUtxoStatistics =
+    :<|> getWalletUtxoStatistics
+    :<|> _ =
         client (Proxy @("v2" :> Wallets))
 
 constructTransaction

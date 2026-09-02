@@ -211,6 +211,7 @@ data ApiErrorInfo
     | PoolAlreadyJoined
     | PoolAlreadyJoinedSameVote
     | QueryParamMissing
+    | RescanAlreadyRunning
     | RedeemerInvalidData
     | RedeemerScriptFailure
     | RedeemerTargetNotFound

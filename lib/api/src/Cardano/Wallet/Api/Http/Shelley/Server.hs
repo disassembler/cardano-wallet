@@ -78,6 +78,7 @@ module Cardano.Wallet.Api.Http.Shelley.Server
     , postTransactionFeeOld
     , postTrezorWallet
     , postWallet
+    , postWalletRescan
     , postShelleyWallet
     , postAccountWallet
     , putByronWalletPassphrase
@@ -219,6 +220,7 @@ import Cardano.Wallet
     , networkLayer
     , readPrivateKey
     , readWalletMeta
+    , rescanWallet
     , signTransactionV2
     , txWitnessTagForKey
     )
@@ -327,7 +329,8 @@ import Cardano.Wallet.Api
     , workerRegistry
     )
 import Cardano.Wallet.Api.Http.Server.Error
-    ( IsServerError (..)
+    ( ErrRescanAlreadyRunning (..)
+    , IsServerError (..)
     , apiError
     , handler
     , liftE
@@ -887,13 +890,19 @@ import System.Random
     ( randomRIO
     )
 import UnliftIO.Async
-    ( race_
+    ( async
+    , race_
     )
 import UnliftIO.Concurrent
     ( threadDelay
     )
 import UnliftIO.Exception
     ( tryAnyDeep
+    )
+import UnliftIO.STM
+    ( modifyTVar'
+    , newTVarIO
+    , readTVar
     )
 import Prelude
 
@@ -972,6 +981,7 @@ import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
 import qualified Data.Text as T
 import qualified Network.Ntp as Ntp
+import qualified UnliftIO.STM as STM
 
 {-------------------------------------------------------------------------------
                               Wallet Constructors
@@ -1959,6 +1969,54 @@ deleteWallet ctx (ApiT wid) = do
   where
     re = ctx ^. workerRegistry @s
     df = ctx ^. dbFactory @s
+
+postWalletRescan
+    :: forall ctx s
+     . ( ctx ~ ApiLayer s
+       , IsOurs s Address
+       , IsOurs s RewardAccount
+       , AddressBookIso s
+       , MaybeLight s
+       )
+    => ctx
+    -> (WorkerCtx ctx -> WalletId -> IO ())
+    -- ^ Coworker action (same as passed to 'newApiLayer')
+    -> ApiT WalletId
+    -> Handler NoContent
+postWalletRescan ctx coworker (ApiT wid) = do
+    -- 404 if wallet doesn't exist
+    withWorkerCtx @_ @s
+        ctx
+        wid
+        liftE
+        (const $ pure ())
+        (const $ pure ())
+    -- Check/set rescan lock atomically (409 if already running)
+    alreadyRunning <- liftIO $ STM.atomically $ do
+        running <- readTVar rescanSet
+        if Set.member wid running
+            then pure True
+            else do
+                modifyTVar' rescanSet (Set.insert wid)
+                pure False
+    liftHandler
+        $ when alreadyRunning
+        $ throwE (ErrRescanAlreadyRunning wid)
+    -- Perform the rescan asynchronously; return 202 immediately
+    liftIO $ void $ async $ do
+        -- Stop the worker
+        Registry.unregister re wid
+        -- Roll back to genesis
+        withDatabaseLoad (ctx ^. dbFactory @s) wid
+            $ \db -> rescanWallet (hoistResource db (MsgFromWorker wid) ctx)
+        -- Restart the worker
+        startWalletWorker ctx coworker wid
+        -- Clear rescan lock
+        STM.atomically $ modifyTVar' rescanSet (Set.delete wid)
+    return NoContent
+  where
+    re = ctx ^. workerRegistry @s
+    rescanSet = _rescanningWallets ctx
 
 getWallet
     :: forall ctx s apiWallet
@@ -5862,7 +5920,8 @@ newApiLayer tr g0 nw tl df tokenMeta coworker = do
     let trTx = contramap MsgSubmitSealedTx tr
     let trW = contramap MsgWalletWorker tr
     locks <- Concierge.newConcierge
-    let ctx = ApiLayer trTx trW g0 nw tl df re locks tokenMeta
+    rescanSet <- newTVarIO Set.empty
+    let ctx = ApiLayer trTx trW g0 nw tl df re locks tokenMeta rescanSet
     listDatabases df >>= mapM_ (startWalletWorker ctx coworker)
     return ctx
 

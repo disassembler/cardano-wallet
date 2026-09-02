@@ -148,6 +148,7 @@ import Cardano.Wallet.Api.Http.Shelley.Server
     , postTransactionOld
     , postTrezorWallet
     , postWallet
+    , postWalletRescan
     , putByronWalletPassphrase
     , putRandomAddress
     , putRandomAddresses
@@ -330,6 +331,7 @@ server byron icarus shelley multisig spl drepLayer ntp blockchainSource =
                 Shelley.getKey
             :<|> getWalletUtxoSnapshot shelley
             :<|> getUTxOsStatistics shelley
+            :<|> postWalletRescan shelley idleWorker
 
     walletKeys :: Server WalletKeys
     walletKeys =

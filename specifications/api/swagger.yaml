@@ -7331,6 +7331,32 @@ paths:
         - *parametersWalletId
       responses: *responsesGetWalletUtxoSnapshot
 
+  /wallets/{walletId}/rescan:
+    post:
+      operationId: postWalletRescan
+      tags: ["Wallets"]
+      summary: Force Rescan
+      description: |
+        Reset a wallet's chain state to genesis and force a full re-index.
+        Key material and wallet metadata are preserved; UTxO, transaction
+        history, and address discovery state are cleared and rebuilt from
+        genesis. The operation is asynchronous — the response is returned
+        immediately (HTTP 202).
+      parameters:
+        - *parametersWalletId
+      responses:
+        "202":
+          description: Rescan initiated successfully.
+        "404":
+          $ref: '#/responses/NotFound'
+        "409":
+          description: |
+            A rescan is already in progress for this wallet.
+          content:
+            application/json:
+              schema:
+                $ref: '#/definitions/ApiErrorResponse'
+
   /wallets/{walletId}:
     get:
       operationId: getWallet

@@ -31,6 +31,7 @@ module Cardano.Wallet.Api
     , PutWalletPassphrase
     , GetUTxOsStatistics
     , GetWalletUtxoSnapshot
+    , PostWalletRescan
     , WalletKeys
     , GetWalletKey
     , SignMetadata
@@ -320,12 +321,16 @@ import Data.Kind
 import Data.List.NonEmpty
     ( NonEmpty
     )
+import Data.Set
+    ( Set
+    )
 import GHC.Generics
     ( Generic
     )
 import Servant.API
     ( Capture
     , JSON
+    , NoContent (..)
     , OctetStream
     , QueryFlag
     , QueryParam
@@ -345,6 +350,9 @@ import Servant.API.Verbs
     , Put
     , PutAccepted
     , PutNoContent
+    )
+import UnliftIO.STM
+    ( TVar
     )
 import Prelude
 
@@ -395,6 +403,7 @@ type Wallets =
         :<|> PutWalletPassphrase
         :<|> GetWalletUtxoSnapshot
         :<|> GetUTxOsStatistics
+        :<|> PostWalletRescan
 
 -- | https://cardano-foundation.github.io/cardano-wallet/api/#operation/deleteWallet
 type DeleteWallet =
@@ -448,6 +457,13 @@ type GetUTxOsStatistics =
         :> "statistics"
         :> "utxos"
         :> Get '[JSON] ApiUtxoStatistics
+
+-- | Force a full wallet rescan from genesis.
+type PostWalletRescan =
+    "wallets"
+        :> Capture "walletId" (ApiT WalletId)
+        :> "rescan"
+        :> PostAccepted '[JSON] NoContent
 
 {-------------------------------------------------------------------------------
                                   Wallet Keys
@@ -1398,6 +1414,8 @@ data ApiLayer s
     , _workerRegistry :: WorkerRegistry WalletId (DBLayer IO s)
     , concierge :: Concierge IO WalletLock
     , _tokenMetadataClient :: TokenMetadataClient IO
+    , _rescanningWallets :: TVar (Set WalletId)
+    -- ^ Tracks wallets currently undergoing a forced rescan.
     }
     deriving (Generic)
 
@@ -1411,7 +1429,7 @@ instance HasWorkerCtx (DBLayer IO s) (ApiLayer s) where
     type WorkerCtx (ApiLayer s) = WalletLayer IO s
     type WorkerMsg (ApiLayer s) = WalletWorkerLog
     type WorkerKey (ApiLayer s) = WalletId
-    hoistResource db transform (ApiLayer _ tr gp nw tl _ _ _ _) =
+    hoistResource db transform (ApiLayer _ tr gp nw tl _ _ _ _ _) =
         WalletLayer (contramap transform tr) gp nw tl db
 
 {-------------------------------------------------------------------------------

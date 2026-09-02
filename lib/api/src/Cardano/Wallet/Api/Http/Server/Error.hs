@@ -24,6 +24,7 @@ module Cardano.Wallet.Api.Http.Server.Error
     , err425
     , showT
     , handler
+    , ErrRescanAlreadyRunning (..)
     )
 where
 
@@ -155,6 +156,9 @@ import Cardano.Wallet.Primitive.Ledger.Convert
 import Cardano.Wallet.Primitive.Slotting
     ( PastHorizonException
     )
+import Cardano.Wallet.Primitive.Types
+    ( WalletId
+    )
 import Cardano.Wallet.Primitive.Types.MetadataEncryption
     ( ErrMetadataDecryption (..)
     , ErrMetadataEncryption (..)
@@ -167,6 +171,9 @@ import Cardano.Wallet.Primitive.Types.TokenQuantity
     )
 import Cardano.Wallet.Transaction
     ( ErrSignTx (..)
+    )
+import Control.Exception
+    ( Exception
     )
 import Data.Generics.Internal.VL
     ( view
@@ -316,6 +323,21 @@ instance IsServerError ErrWalletAlreadyExists where
                     , toText wid
                     , " However, I already know of a wallet with this id."
                     ]
+
+-- | A rescan is already in progress for the given wallet.
+newtype ErrRescanAlreadyRunning = ErrRescanAlreadyRunning WalletId
+    deriving (Eq, Show)
+
+instance Exception ErrRescanAlreadyRunning
+
+instance IsServerError ErrRescanAlreadyRunning where
+    toServerError (ErrRescanAlreadyRunning wid) =
+        apiError err409 RescanAlreadyRunning
+            $ T.unwords
+                [ "A rescan is already in progress for wallet"
+                , toText wid <> "."
+                , "Wait for it to complete before requesting another."
+                ]
 
 instance IsServerError ErrWithRootKey where
     toServerError = \case

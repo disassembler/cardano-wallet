@@ -45,6 +45,7 @@ module Cardano.Wallet.Api.Link
     , putWalletPassphrase
     , getWalletUtxoSnapshot
     , getUTxOsStatistics
+    , postWalletRescan
     , createMigrationPlan
     , migrateWallet
 
@@ -303,6 +304,22 @@ getWalletUtxoSnapshot w =
         (endpoint @Api.GetWalletUtxoSnapshot (wid &))
         (endpoint @Api.GetByronWalletUtxoSnapshot (wid &))
         (endpoint @Api.GetSharedWalletUtxoSnapshot (wid &))
+  where
+    wid = w ^. typed @(ApiT WalletId)
+
+postWalletRescan
+    :: forall (style :: WalletStyle) w
+     . ( HasCallStack
+       , Discriminate style
+       , HasType (ApiT WalletId) w
+       )
+    => w
+    -> (Method, Text)
+postWalletRescan w =
+    discriminate @style
+        (endpoint @Api.PostWalletRescan (wid &))
+        (notSupported "Byron")
+        (notSupported "Shared")
   where
     wid = w ^. typed @(ApiT WalletId)
 
