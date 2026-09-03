@@ -84,6 +84,8 @@ data QueryTxWalletsHistory b where
         :: Range SlotNo
         -> Maybe Natural
         -> SortOrder
+        -> Maybe Word32
+        -- ^ Optional account index filter; 'Nothing' returns all accounts.
         -> QueryTxWalletsHistory [TxMeta]
 
 instance Query QueryTxWalletsHistory where
@@ -92,9 +94,9 @@ instance Query QueryTxWalletsHistory where
         GetByTxId txid -> query (TxSet.GetByTxId txid) txs
         GetTxOut key -> query (TxSet.GetTxOut key) txs
         OneMeta txId -> query (GetOne txId) metas
-        SomeMetas range limit order ->
+        SomeMetas range limit order mAcctIx ->
             flip query metas
-                $ GetSome range limit order
+                $ GetSome range limit order mAcctIx
 
 {-----------------------------------------------------------------------------
     Query Store type
@@ -116,6 +118,6 @@ newQueryStoreTxWalletsHistory =
         GetByTxId txid -> queryS txs $ TxSet.GetByTxId txid
         GetTxOut key -> queryS txs $ TxSet.GetTxOut key
         OneMeta txId -> queryS metas $ GetOne txId
-        SomeMetas range limit order ->
+        SomeMetas range limit order mAcctIx ->
             queryS metas
-                $ GetSome range limit order
+                $ GetSome range limit order mAcctIx

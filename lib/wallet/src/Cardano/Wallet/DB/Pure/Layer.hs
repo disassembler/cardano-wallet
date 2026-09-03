@@ -102,8 +102,8 @@ withBootDBLayer timeInterpreter wid params k = do
                                            Tx History
               -----------------------------------------------------------------------}
 
-              putTxHistory = noErrorAlterDB db . mPutTxHistory
-            , readTransactions = \minWithdrawal order range mstatus _mlimit maddress ->
+              putTxHistory = \_acctIx -> noErrorAlterDB db . mPutTxHistory
+            , readTransactions = \minWithdrawal order range mstatus _mlimit maddress _mAcctIx ->
                 fmap (fromMaybe [])
                     $ readDBMaybe db
                     $ mReadTxHistory

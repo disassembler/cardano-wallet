@@ -501,11 +501,11 @@ runIO DBLayer{..} = fmap Resp . go
         ListCheckpoints ->
             Right . ChainPoints
                 <$> atomically listCheckpoints
-        PutTxHistory txs -> runDBSuccess atomically Unit $ putTxHistory txs
+        PutTxHistory txs -> runDBSuccess atomically Unit $ putTxHistory 0 txs
         ReadTxHistory minWith order range status ->
             fmap (Right . TxHistory)
                 $ atomically
-                $ readTransactions minWith order range status Nothing Nothing
+                $ readTransactions minWith order range status Nothing Nothing Nothing
         GetTx tid ->
             runDBSuccess atomically (TxHistory . maybe [] pure) $ getTx tid
         ReadGenesisParameters ->

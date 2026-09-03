@@ -47,6 +47,9 @@ import Data.Set
 import Fmt
     ( Buildable (build)
     )
+import Data.Word
+    ( Word32
+    )
 import GHC.Generics
     ( Generic
     )
@@ -109,12 +112,12 @@ rollbackTxMetaHistory point (TxMetaHistory txs) =
 {-----------------------------------------------------------------------------
     Type conversion helpers
 ------------------------------------------------------------------------------}
-mkTxMetaEntity :: W.WalletId -> W.Tx -> W.TxMeta -> TxMeta
-mkTxMetaEntity wid tx derived =
+mkTxMetaEntity :: W.WalletId -> Word32 -> W.Tx -> W.TxMeta -> TxMeta
+mkTxMetaEntity wid acctIx tx derived =
     TxMeta
         { txMetaTxId = TxId $ tx ^. #txId
         , txMetaWalletId = wid
-        , txMetaAccountIndex = 0
+        , txMetaAccountIndex = acctIx
         , txMetaStatus = derived ^. #status
         , txMetaDirection = derived ^. #direction
         , txMetaSlot = derived ^. #slotNo
@@ -131,12 +134,12 @@ mkTxMetaEntity wid tx derived =
                 W.TxScriptInvalid -> False
         }
 
--- | Compute a 'TxMetaHistory' for a wallet.
-mkTxMetaHistory :: W.WalletId -> [(W.Tx, W.TxMeta)] -> TxMetaHistory
-mkTxMetaHistory wid txs =
+-- | Compute a 'TxMetaHistory' for a wallet account.
+mkTxMetaHistory :: W.WalletId -> Word32 -> [(W.Tx, W.TxMeta)] -> TxMetaHistory
+mkTxMetaHistory wid acctIx txs =
     TxMetaHistory
         $ Map.fromList
-            [ (TxId $ tx ^. #txId, mkTxMetaEntity wid tx meta)
+            [ (TxId $ tx ^. #txId, mkTxMetaEntity wid acctIx tx meta)
             | (tx, meta) <- txs
             ]
 

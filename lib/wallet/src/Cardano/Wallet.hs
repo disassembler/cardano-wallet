@@ -209,6 +209,7 @@ module Cardano.Wallet
       -- ** Transaction
     , forgetTx
     , listTransactions
+    , listTransactionsForAccount
     , listAssets
     , getTransaction
     , submitExternalTx
@@ -547,7 +548,9 @@ import Cardano.Wallet.Primitive.Ledger.Shelley
     )
 import Cardano.Wallet.Primitive.Model
     ( BlockData (..)
+    , FilteredBlock (FilteredBlock)
     , Wallet
+    , applyBlockEventsToUTxO
     , applyBlocks
     , applyOurTxToUTxO
     , availableUTxO
@@ -1313,6 +1316,7 @@ readWallet ctx = do
                 (Just Pending)
                 Nothing
                 Nothing
+                Nothing
         pure
             ( cp
             , (meta, calculateWalletDelegations currentEpochSlotting)
@@ -1804,7 +1808,7 @@ restoreBlocks ctx tr blocks nodeTip =
             extraResults <- forM extraIdxs $ \ix -> do
                 mExtraSt <- readSeqStateForAccount ix
                 case mExtraSt of
-                    Nothing -> pure (ix, Nothing, mempty :: UTxO, mempty :: UTxO)
+                    Nothing -> pure (ix, Nothing, mempty :: UTxO, mempty :: UTxO, [])
                     Just extraSt0 -> do
                         (extraChainEvents, extraSt1) <-
                             liftIO $ discoverFromBlockData blocks extraSt0
@@ -1815,26 +1819,28 @@ restoreBlocks ctx tr blocks nodeTip =
                             -- tx inputs, even when those entries belong to a different account.
                             isAcctAddr addr = isJust . fst $ isOurs addr extraSt0
                             acctCurrentUTxO = UTxO.filterByAddress isAcctAddr (utxo cp0)
-                            acctNewUTxO = foldl' applyBE acctCurrentUTxO extraBlockEvents
-                            applyBE u be =
-                                let sl = be ^. #slot
-                                    bh = be ^. #blockHeight
-                                in foldl' (applyOneTx sl bh) u (be ^. #transactions)
-                            applyOneTx sl bh u tx = case applyOurTxToUTxO sl bh extraSt1 tx u of
-                                Nothing -> u
-                                Just (_, _, u') -> u'
-                        pure (ix, Just (getPrologue extraSt1), acctCurrentUTxO, acctNewUTxO)
+                            -- Apply each block event, collecting UTxO changes and tx history.
+                            applyOneBlock (curUTxO, accTxs) blockEvent =
+                                let ((FilteredBlock _ fbTxs _, _du), newUTxO) =
+                                        applyBlockEventsToUTxO blockEvent extraSt1 curUTxO
+                                in (newUTxO, accTxs <> fbTxs)
+                            (acctNewUTxO, acctTxs) =
+                                foldl' applyOneBlock (acctCurrentUTxO, []) extraBlockEvents
+                        pure (ix, Just (getPrologue extraSt1), acctCurrentUTxO, acctNewUTxO, acctTxs)
             let -- Remove each account's old UTxO from the checkpoint, add its new UTxO.
                 -- This correctly handles both receiving new outputs and spending existing ones.
-                allOldExtraUTxOs = mconcat [old | (_, _, old, _) <- extraResults]
-                allNewExtraUTxOs = mconcat [new | (_, _, _, new) <- extraResults]
+                allOldExtraUTxOs = mconcat [old | (_, _, old, _, _) <- extraResults]
+                allNewExtraUTxOs = mconcat [new | (_, _, _, new, _) <- extraResults]
                 lastCpFixed = lastCp
                     { utxo = UTxO.difference (utxo lastCp) allOldExtraUTxOs
                         <> allNewExtraUTxOs
                     }
+            -- Store tx history for each extra account.
+            forM_ extraResults $ \(ix, _, _, _, acctTxs) ->
+                unless (null acctTxs) $ putTxHistory ix acctTxs
             pure
                 ( NE.fromList $ L.init (NE.toList cps) ++ [lastCpFixed]
-                , [InsertExtraPrologue ix p | (ix, Just p, _, _) <- extraResults]
+                , [InsertExtraPrologue ix p | (ix, Just p, _, _, _) <- extraResults]
                 )
 
         -- Checkpoint deltas computed from the extra-UTxO-augmented checkpoints.
@@ -1851,7 +1857,7 @@ restoreBlocks ctx tr blocks nodeTip =
             forM_ mcbor $ \cbor -> do
                 traceWith tr $ MsgStoringCBOR cbor
 
-        putTxHistory txs
+        putTxHistory 0 txs
 
         rollForwardTxSubmissions (localTip ^. #slotNo)
             $ fmap (\(tx, meta) -> (meta ^. #slotNo, txId tx)) txs
@@ -2975,6 +2981,7 @@ buildSignSubmitTransaction
                                     (Just Pending)
                                     Nothing
                                     Nothing
+                                    Nothing
                         ( throwOnErr
                                 <=< (Delta.onDBVar walletState . Delta.updateWithResultAndError)
                             )
@@ -3151,6 +3158,7 @@ buildSignSubmitTransaction
                                     (Just Pending)
                                     Nothing
                                     Nothing
+                                    Nothing
                         txWithSlot@(builtTx, slot) <-
                             ( throwOnErr
                                 <=< (Delta.onDBVar walletState . Delta.updateWithResultAndError)
@@ -3272,6 +3280,7 @@ buildSignSubmitAccountTransaction
                                     Descending
                                     Range.everything
                                     (Just Pending)
+                                    Nothing
                                     Nothing
                                     Nothing
                         ( throwOnErr
@@ -3601,6 +3610,7 @@ buildTransaction
                         Descending
                         Range.everything
                         (Just Pending)
+                        Nothing
                         Nothing
                         Nothing
 
@@ -4349,7 +4359,7 @@ listTransactions ctx mMinWithdrawal mStart mEnd order mLimit mAddress =
                     (pure [])
                     ( \r ->
                         lift
-                            $ readTransactions mMinWithdrawal order r Nothing mLimit mAddress
+                            $ readTransactions mMinWithdrawal order r Nothing mLimit mAddress (Just 0)
                     )
   where
     ti :: TimeInterpreter (ExceptT PastHorizonException IO)
@@ -4360,6 +4370,55 @@ listTransactions ctx mMinWithdrawal mStart mEnd order mLimit mAddress =
     -- Transforms the user-specified time range into a slot range. If the
     -- user-specified range terminates before the start of the blockchain,
     -- returns 'Nothing'.
+    getSlotRange
+        :: ExceptT ErrListTransactions IO (Maybe (Range SlotNo))
+    getSlotRange = case (mStart, mEnd) of
+        (Just start, Just end) | start > end -> do
+            let err = ErrStartTimeLaterThanEndTime start end
+            throwE (ErrListTransactionsStartTimeLaterThanEndTime err)
+        _ -> do
+            withExceptT ErrListTransactionsPastHorizonException
+                $ interpretQuery ti
+                $ slotRangeFromTimeRange
+                $ Range mStart mEnd
+
+-- | List transactions for a specific account index within a wallet.
+listTransactionsForAccount
+    :: WalletLayer IO s
+    -> Word32
+    -- ^ Account index (e.g. 0 for account 0H, 1 for account 1H).
+    -> Maybe Coin
+    -> Maybe UTCTime
+    -> Maybe UTCTime
+    -> SortOrder
+    -> Maybe Natural
+    -> Maybe Address
+    -> ExceptT ErrListTransactions IO [TransactionInfo]
+listTransactionsForAccount ctx acctIx mMinWithdrawal mStart mEnd order mLimit mAddress =
+    db & \DBLayer{..} -> do
+        when (Just True == ((< (Coin 1)) <$> mMinWithdrawal))
+            $ throwE ErrListTransactionsMinWithdrawalWrong
+        mapExceptT atomically $ do
+            mapExceptT liftIO getSlotRange
+                >>= maybe
+                    (pure [])
+                    ( \r ->
+                        lift
+                            $ readTransactions
+                                mMinWithdrawal
+                                order
+                                r
+                                Nothing
+                                mLimit
+                                mAddress
+                                (Just acctIx)
+                    )
+  where
+    ti :: TimeInterpreter (ExceptT PastHorizonException IO)
+    ti = timeInterpreter (ctx ^. networkLayer)
+
+    db = ctx ^. dbLayer
+
     getSlotRange
         :: ExceptT ErrListTransactions IO (Maybe (Range SlotNo))
     getSlotRange = case (mStart, mEnd) of
@@ -4389,6 +4448,7 @@ listAssets ctx =
                         Ascending
                         Range.everything
                         allTxStatuses
+                        Nothing
                         Nothing
                         Nothing
         let txAssets :: TransactionInfo -> Set AssetId

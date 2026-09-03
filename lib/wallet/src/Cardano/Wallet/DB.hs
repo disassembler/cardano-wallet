@@ -234,8 +234,8 @@ data DBLayer m s = forall stm. (MonadIO stm, MonadFail stm) => DBLayer
         :: stm [ChainPoint]
     -- ^ List all known checkpoint tips, ordered by slot ids from the oldest
     -- to the newest.
-    , putTxHistory :: [(Tx, TxMeta)] -> stm ()
-    -- ^ Augments the transaction history for a known wallet.
+    , putTxHistory :: Word32 -> [(Tx, TxMeta)] -> stm ()
+    -- ^ Augments the transaction history for a known wallet account.
     --
     -- If an entry for a particular transaction already exists it is not
     -- altered nor merged (just ignored).
@@ -246,6 +246,8 @@ data DBLayer m s = forall stm. (MonadIO stm, MonadFail stm) => DBLayer
         -> Maybe TxStatus
         -> Maybe Natural
         -> Maybe Address
+        -> Maybe Word32
+        -- ^ Optional account index filter; 'Nothing' returns all accounts.
         -> stm [TransactionInfo]
     -- ^ Fetch the current transaction history of a known wallet, ordered by
     -- descending slot number.
@@ -396,11 +398,11 @@ mkDBLayerFromParts ti wid_ DBLayerCollection{..} =
         , readCheckpoint = readCheckpoint'
         , listCheckpoints = listCheckpoints_ dbCheckpoints
         , putTxHistory = putTxHistory_ dbTxHistory
-        , readTransactions = \minWithdrawal order range status limit maddress ->
+        , readTransactions = \minWithdrawal order range status limit maddress mAcctIx ->
             readCurrentTip >>= \tip -> do
                 inLedgers <-
                     if status `elem` [Nothing, Just WTxMeta.InLedger]
-                        then readTxHistory_ dbTxHistory range tip limit order
+                        then readTxHistory_ dbTxHistory range tip limit order mAcctIx
                         else pure []
                 let isInSubmission = has (txStatus . _InSubmission)
                     isExpired = has (txStatus . _Expired)
@@ -496,9 +498,10 @@ data DBCheckpoints stm s = DBCheckpoints
 -- | A database layer that stores the transaction history.
 data DBTxHistory stm = DBTxHistory
     { putTxHistory_
-        :: [(Tx, TxMeta)]
+        :: Word32
+        -> [(Tx, TxMeta)]
         -> stm ()
-    -- ^ Augments the transaction history for a known wallet.
+    -- ^ Augments the transaction history for a known wallet account.
     --
     -- If an entry for a particular transaction already exists it is not
     -- altered nor merged (just ignored).
@@ -510,6 +513,8 @@ data DBTxHistory stm = DBTxHistory
         -> BlockHeader
         -> Maybe Natural
         -> SortOrder
+        -> Maybe Word32
+        -- ^ Optional account index filter; 'Nothing' returns all accounts.
         -> stm [TransactionInfo]
     -- ^ Fetch the current transaction history of a known wallet, ordered by
     -- descending slot number.

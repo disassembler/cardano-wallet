@@ -723,7 +723,7 @@ fileModeSpec = do
 
             it "put and read tx history (Ascending)" $ \f -> do
                 withShelleyFileBootDBLayer f $ \DBLayer{atomically, putTxHistory} ->
-                    atomically $ putTxHistory testTxs
+                    atomically $ putTxHistory 0 testTxs
                 testReopening
                     f
                     ( \db' ->
@@ -732,7 +732,7 @@ fileModeSpec = do
                     testTxs -- expected after opening db
             it "put and read tx history (Descending)" $ \f -> do
                 withShelleyFileBootDBLayer f $ \DBLayer{atomically, putTxHistory} ->
-                    atomically $ putTxHistory testTxs
+                    atomically $ putTxHistory 0 testTxs
                 testReopening
                     f
                     ( \db' ->
@@ -786,7 +786,7 @@ fileModeSpec = do
 
                         atomically $ do
                             putCheckpoint cpB
-                            putTxHistory txs
+                            putTxHistory 0 txs
                             Delta.onDBVar walletState
                                 $ WalletState.updateCheckpoints
                                 $ Delta.update deltaPruneCheckpoints
@@ -1217,7 +1217,7 @@ readTransactions'
     -> m [(Tx, TxMeta)]
 readTransactions' DBLayer{..} a1 a2 mstatus =
     atomically . fmap (fmap toTxHistory)
-        $ readTransactions Nothing a1 a2 mstatus Nothing Nothing
+        $ readTransactions Nothing a1 a2 mstatus Nothing Nothing Nothing
 
 readPrivateKey'
     :: DBLayer m s
@@ -1583,6 +1583,7 @@ testMigrationTxMetaFee dbName expectedLength caseByCase = do
                 Nothing
                 Nothing
                 Nothing
+                Nothing
 
     -- Check that we've indeed logged a needed migration for 'fee'
     length (filter isMsgManualMigration logs) `shouldBe` 1
@@ -1942,6 +1943,7 @@ getAvailableBalance DBLayer{..} = do
                     (Just Pending)
                     Nothing
                     Nothing
+                    Nothing
     return
         $ fromIntegral
         $ unCoin
@@ -1958,6 +1960,7 @@ getTxsInLedger DBLayer{..} = do
                     Descending
                     Range.everything
                     (Just InLedger)
+                    Nothing
                     Nothing
                     Nothing
     pure

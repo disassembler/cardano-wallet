@@ -66,6 +66,9 @@ import Database.Persist.Sql
     , (>.)
     , (>=.)
     )
+import Data.Word
+    ( Word32
+    )
 import GHC.Natural
     ( Natural
     )
@@ -86,6 +89,8 @@ data QueryTxMeta b where
         :: Range SlotNo
         -> Maybe Natural
         -> SortOrder
+        -> Maybe Word32
+        -- ^ Optional account index filter; 'Nothing' returns all accounts.
         -> QueryTxMeta [DB.TxMeta]
     GetAfterSlot :: SlotNo -> QueryTxMeta (Set TxId)
     GetOne :: TxId -> QueryTxMeta (Maybe DB.TxMeta)
@@ -115,10 +120,12 @@ mkQueryStoreTxMeta =
   where
     query' :: forall b. QueryTxMeta b -> (SqlPersistT IO) b
     query' = \case
-        GetSome range limit order ->
+        GetSome range limit order mAcctIx ->
             fmap entityVal
                 <$> selectList @DB.TxMeta
-                    (filterMetas True range)
+                    ( filterMetas True range
+                        <> maybe [] (\ix -> [TxMetaAccountIndex ==. ix]) mAcctIx
+                    )
                     (limitMetas limit <> orderMetas order)
         GetOne txId ->
             fmap entityVal
@@ -135,7 +142,7 @@ instance Query QueryTxMeta where
     type World QueryTxMeta = TxMetaHistory
     query :: QueryTxMeta b -> World QueryTxMeta -> b
     query q (TxMetaHistory allTransactions) = case q of
-        GetSome range mlimit order ->
+        GetSome range mlimit order mAcctIx ->
             let whichMeta DB.TxMeta{..} =
                     and
                         $ catMaybes
@@ -143,6 +150,8 @@ instance Query QueryTxMeta where
                                 <$> Range.inclusiveLowerBound range
                             , (txMetaSlot <=)
                                 <$> Range.inclusiveUpperBound range
+                            , (txMetaAccountIndex ==)
+                                <$> mAcctIx
                             ]
                 reorder = case order of
                     Ascending -> sortOn ((,) <$> txMetaSlot <*> txMetaTxId)

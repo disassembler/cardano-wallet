@@ -3316,7 +3316,7 @@ listWalletAccountTransactionsH
     -> Handler [ApiTransaction n]
 listWalletAccountTransactionsH
     ctx
-    wid
+    (ApiT wid)
     (ApiT (DerivationIndex accountIxW))
     mMinWithdrawal
     mStart
@@ -3324,11 +3324,37 @@ listWalletAccountTransactionsH
     mOrder
     mLimit
     mAddress
-    simpleMetadataFlag
-        | Index accountIxW == (minBound :: Index 'Hardened 'AccountK) =
-            listTransactions ctx wid mMinWithdrawal mStart mEnd mOrder mLimit mAddress
-                $ if simpleMetadataFlag then TxMetadataNoSchema else TxMetadataDetailedSchema
-        | otherwise = return []
+    simpleMetadataFlag = do
+        withWorkerCtx ctx wid liftE liftE $ \wrk -> do
+            txs <-
+                liftHandler
+                    $ W.listTransactionsForAccount
+                        wrk
+                        dbAcctIx
+                        (Coin . fromIntegral . getMinWithdrawal <$> mMinWithdrawal)
+                        (getIso8601Time <$> mStart)
+                        (getIso8601Time <$> mEnd)
+                        (maybe defaultSortOrder getApiT mOrder)
+                        (fromApiLimit <$> mLimit)
+                        (apiAddress <$> mAddress)
+            depo <-
+                liftIO
+                    $ W.stakeKeyDeposit
+                        <$> NW.currentProtocolParameters (wrk ^. networkLayer)
+            forM txs $ \tx ->
+                mkApiTransactionFromInfo
+                    (timeInterpreter (ctx ^. networkLayer))
+                    wrk
+                    depo
+                    tx
+                    (if simpleMetadataFlag then TxMetadataNoSchema else TxMetadataDetailedSchema)
+  where
+    defaultSortOrder :: SortOrder
+    defaultSortOrder = Descending
+    -- Account 0H is stored with DB index 0 (from the initial insertPrologue).
+    -- Extra accounts (1H, 2H, …) are stored with their raw hardened index.
+    minIx = getIndex (minBound :: Index 'Hardened 'AccountK)
+    dbAcctIx = if accountIxW == minIx then 0 else accountIxW
 
 listTransactions
     :: forall s n

@@ -704,7 +704,7 @@ bootDBLayerFromSqliteContext wF ti wid params SqliteContext{runQuery} = do
                 atomically_ $ mkDBLayer <$> initDBVar store wallet
             atomically
                 $ updateS transactionsStore Nothing
-                $ ExpandTxWalletsHistory wid
+                $ ExpandTxWalletsHistory wid 0
                 $ dBLayerParamsHistory params
             pure dblayer
   where
@@ -863,11 +863,11 @@ mkDBLayerCollection ti wid atomically_ walletState =
 
     dbTxHistory =
         DBTxHistory
-            { putTxHistory_ =
+            { putTxHistory_ = \acctIx ->
                 updateS transactionsQS Nothing
-                    . ExpandTxWalletsHistory wid
-            , readTxHistory_ = \range tip mlimit order -> do
-                txs <- queryS transactionsQS $ SomeMetas range mlimit order
+                    . ExpandTxWalletsHistory wid acctIx
+            , readTxHistory_ = \range tip mlimit order mAcctIx -> do
+                txs <- queryS transactionsQS $ SomeMetas range mlimit order mAcctIx
                 forM txs
                     $ selectTransactionInfo ti tip lookupTx lookupTxOut
             , getTx_ = \txid tip -> do

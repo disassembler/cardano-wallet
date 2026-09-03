@@ -172,11 +172,11 @@ spec = do
     describe "transaction history" $ do
         it "listTransactions returns empty for a fresh wallet"
             testListTransactionsEmptyForFreshWallet
-        it "per-account transaction history is isolated (not yet implemented)" $
+        it "per-account transaction history is isolated" $
             pendingWith
-                "listWalletAccountTransactionsH returns [] for non-0H accounts; \
-                \mkTxMetaEntity hardcodes accountIndex=0 and readTransactions has no \
-                \account filter — see implementation tasks"
+                "test not yet written; infrastructure is in place: \
+                \putTxHistory accepts accountIndex, readTransactions accepts \
+                \Maybe Word32 account filter, mkTxMetaHistory passes accountIndex through"
 
     -- Group C: Consolidation plan
     describe "createAccountMigrationPlan" $ do

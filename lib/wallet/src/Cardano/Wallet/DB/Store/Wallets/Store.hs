@@ -68,12 +68,12 @@ mkStoreTxWalletsHistory storeTransactions storeMeta =
                             $ TxMetaStore.Rollback slot
                         updateS storeTransactions mTxSet
                             $ DeleteTxs tbd
-                    ExpandTxWalletsHistory wid cs -> do
+                    ExpandTxWalletsHistory wid acctIx cs -> do
                         updateS storeTransactions mTxSet
                             $ Append
                             $ mkTxSet
                             $ fst <$> cs
                         updateS storeMeta mWmetas
                             $ TxMetaStore.Expand
-                            $ mkTxMetaHistory wid cs
+                            $ mkTxMetaHistory wid acctIx cs
     in  mkUpdateStore load write update
