@@ -229,6 +229,7 @@ import Cardano.Wallet
     , TxSubmitLog
     , WalletWorkerLog (..)
     , addWalletAccount
+    , addWalletAccountXPub
     , dbLayer
     , deleteWalletAccount
     , dummyChangeAddressGen
@@ -1052,7 +1053,12 @@ postWalletAccount
     -> Handler ApiAccount
 postWalletAccount ctx (ApiT wid) body =
     withWorkerCtx @_ @s ctx wid liftE liftE $ \wrk -> do
-        liftHandler $ addWalletAccount wrk accountIx pwd
+        case (body ^. #passphrase, body ^. #accountPublicKey) of
+            (Just pwd, Nothing) ->
+                liftHandler $ addWalletAccount wrk accountIx (getApiT pwd)
+            (Nothing, Just (ApiAccountPublicKey (ApiT xpub))) ->
+                liftHandler $ addWalletAccountXPub wrk accountIx xpub
+            _ -> throwError err400
         (cp, _, _) <- handler $ readWallet wrk
         progress <- liftIO $ walletSyncProgress @_ @_ ctx cp
         let ti = timeInterpreter (ctx ^. networkLayer)
@@ -1093,7 +1099,6 @@ postWalletAccount ctx (ApiT wid) body =
                 }
   where
     accountIx = Index $ getDerivationIndex $ getApiT $ body ^. #accountIndex
-    pwd = getApiT $ body ^. #passphrase
 
 getWalletAccount
     :: forall ctx s n k

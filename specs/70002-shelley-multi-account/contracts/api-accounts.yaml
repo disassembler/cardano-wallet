@@ -31,6 +31,20 @@ components:
           type: string
           pattern: "^[0-9]+'?H$"
           example: "1H"
+        passphrase:
+          description: |
+            Wallet passphrase for software wallets. Provide this to derive the
+            account key from the wallet's root key.
+          type: string
+          example: "Secure Passphrase"
+        account_public_key:
+          description: |
+            Account-level public key (64 bytes hex-encoded). Provide this
+            instead of 'passphrase' for hardware wallet accounts where the
+            root key is not available. This should be the XPub exported from
+            the hardware device at path m/1852'/1815'/N'.
+          type: string
+          example: "1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
 
     ApiAccount:
       type: object

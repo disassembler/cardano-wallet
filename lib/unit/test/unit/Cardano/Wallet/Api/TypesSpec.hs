@@ -3022,7 +3022,24 @@ instance Arbitrary ApiHealthCheck where
     shrink = genericShrink
 
 instance Arbitrary ApiPostAccount where
-    arbitrary = genericArbitrary
+    arbitrary = do
+        accountIndex <- arbitrary
+        useXPub <- arbitrary
+        if useXPub
+            then do
+                xpub <- arbitrary
+                pure ApiPostAccount
+                    { accountIndex
+                    , passphrase = Nothing
+                    , accountPublicKey = Just xpub
+                    }
+            else do
+                pwd <- arbitrary
+                pure ApiPostAccount
+                    { accountIndex
+                    , passphrase = Just pwd
+                    , accountPublicKey = Nothing
+                    }
     shrink = genericShrink
 
 instance Arbitrary AccountMode where

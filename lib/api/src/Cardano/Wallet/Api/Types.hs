@@ -570,7 +570,8 @@ import Data.Map.Strict
     ( Map
     )
 import Data.Maybe
-    ( fromMaybe
+    ( catMaybes
+    , fromMaybe
     )
 import Data.Percentage
     ( Percentage
@@ -1023,11 +1024,31 @@ data ApiAccount = ApiAccount
 
 data ApiPostAccount = ApiPostAccount
     { accountIndex :: ApiT DerivationIndex
-    , passphrase :: ApiT (Passphrase "user")
+    , passphrase :: Maybe (ApiT (Passphrase "user"))
+    , accountPublicKey :: Maybe ApiAccountPublicKey
     }
     deriving (Eq, Generic, Show)
-    deriving (FromJSON, ToJSON) via DefaultRecord ApiPostAccount
     deriving anyclass (NFData)
+
+instance FromJSON ApiPostAccount where
+    parseJSON = withObject "Cardano.Wallet.Api.Types.ApiPostAccount(ApiPostAccount)" $ \o -> do
+        accountIndex <- o .: "account_index"
+        passphrase <- o .:? "passphrase"
+        accountPublicKey <- o .:? "account_public_key"
+        case (passphrase, accountPublicKey) of
+            (Nothing, Nothing) ->
+                fail "must provide either 'passphrase' or 'account_public_key'"
+            (Just _, Just _) ->
+                fail "cannot provide both 'passphrase' and 'account_public_key'"
+            _ -> pure ApiPostAccount{accountIndex, passphrase, accountPublicKey}
+
+instance ToJSON ApiPostAccount where
+    toJSON ApiPostAccount{accountIndex, passphrase, accountPublicKey} =
+        object $ catMaybes
+            [ Just ("account_index" .= accountIndex)
+            , ("passphrase" .=) <$> passphrase
+            , ("account_public_key" .=) <$> accountPublicKey
+            ]
 
 newtype ApiSetAccountMode = ApiSetAccountMode
     { mode :: AccountMode

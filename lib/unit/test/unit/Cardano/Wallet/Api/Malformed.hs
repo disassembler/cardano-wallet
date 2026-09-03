@@ -1636,11 +1636,15 @@ instance Malformed (BodyParam ApiPostAccount) where
             first (BodyParam . Aeson.encode)
                 <$> [
                         ( [aesonQQ| { "passphrase": #{wPassphrase} }|]
-                        , "Error in $: parsing Cardano.Wallet.Api.Types.ApiPostAccount(ApiPostAccount) failed, key 'account_index' not found"
+                        , "Error in $: key 'account_index' not found"
                         )
                     ,
                         ( [aesonQQ| { "account_index": "0H" }|]
-                        , "Error in $: parsing Cardano.Wallet.Api.Types.ApiPostAccount(ApiPostAccount) failed, key 'passphrase' not found"
+                        , "Error in $: must provide either 'passphrase' or 'account_public_key'"
+                        )
+                    ,
+                        ( [aesonQQ| { "account_index": "0H", "passphrase": #{wPassphrase}, "account_public_key": #{accountPublicKeyValid} }|]
+                        , "Error in $: cannot provide both 'passphrase' and 'account_public_key'"
                         )
                     ,
                         ( [aesonQQ| { "account_index": "0H", "passphrase": 123 }|]
@@ -2559,6 +2563,9 @@ accountPublicKeyTooLong = T.replicate 129 "1"
 
 accountPublicKeyTooShort :: Text
 accountPublicKeyTooShort = "1"
+
+accountPublicKeyValid :: Text
+accountPublicKeyValid = T.replicate 128 "1"
 
 wName :: Text
 wName =

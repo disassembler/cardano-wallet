@@ -124,6 +124,7 @@ module Cardano.Wallet
     , setChangeAddressModeShared
     , setChangeAddressModeForAccount
     , addWalletAccount
+    , addWalletAccountXPub
     , listWalletAccounts
     , deleteWalletAccount
     , readAccountUTxO
@@ -5436,6 +5437,45 @@ addWalletAccount ctx accountIx pwd =
   where
     db = ctx ^. dbLayer
     tr = contramap MsgWallet (logger_ ctx)
+    kF = keyFlavorFromState @s
+    accountIxW = softAccountIx accountIx
+
+-- | Add a new hardened account to an existing Shelley wallet using an
+-- account-level public key. Intended for hardware wallets where the root key
+-- is not available; the caller exports m/1852'/1815'/N' from the device.
+-- Returns 'ErrAddAccountDuplicate' if the index already exists.
+addWalletAccountXPub
+    :: forall s n k
+     . ( s ~ SeqState n k
+       , SupportsDiscovery n k
+       , Excluding '[ByronKey, SharedKey] k
+       , WalletFlavor s
+       )
+    => WalletLayer IO s
+    -> Index 'Hardened 'AccountK
+    -> XPub
+    -> ExceptT ErrAddAccount IO ()
+addWalletAccountXPub ctx accountIx rawXPub =
+    db & \DBLayer{..} -> do
+        when (accountIx == minBound) $ throwE ErrAddAccountDuplicate
+        let accountXPub = liftRawKey kF rawXPub
+            seqState :: SeqState n k
+            seqState =
+                mkSeqStateFromAccountXPub @n
+                    accountXPub
+                    Nothing
+                    purposeCIP1852
+                    defaultAddressPoolGap
+                    IncreasingChangeAddresses
+                & #derivationPrefix .~ DerivationPrefix (purposeCIP1852, coinTypeAda, accountIx)
+        ExceptT $ atomically $ do
+            existing <- listSeqAccounts
+            if accountIxW `elem` existing
+                then pure (Left ErrAddAccountDuplicate)
+                else Right () <$ onDBVar walletState
+                        (update $ \_ -> [InsertExtraPrologue accountIxW (SeqPrologue seqState)])
+  where
+    db = ctx ^. dbLayer
     kF = keyFlavorFromState @s
     accountIxW = softAccountIx accountIx
 
