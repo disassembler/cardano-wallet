@@ -1121,7 +1121,7 @@ getWalletAccount ctx (ApiT wid) (ApiT (DerivationIndex accountIxW)) =
         mode <- liftIO $ if accountIxW == minIx
             then pure $ fromChangeAddressMode $ Seq.changeAddressMode (getState cp)
             else do
-                mSt <- db & \W.DBLayer{..} -> atomically $ readSeqStateForAccount accountIxW
+                mSt <- db & \W.DBLayer{..} -> atomically $ readSeqStateForAccount (accountIxW - minIx)
                 pure $ maybe AccountModeHD (fromChangeAddressMode . Seq.changeAddressMode) mSt
         utxo <- liftIO $ readAccountUTxO wrk (Index accountIxW)
         let acctBal = UTxO.balance utxo
@@ -1160,15 +1160,13 @@ getWalletAccount ctx (ApiT wid) (ApiT (DerivationIndex accountIxW)) =
                 , tip = tip'
                 }
   where
-    -- The default account 0H is stored as index 0 in the DB; all others use
-    -- their raw hardened Word32. Handle both cases for the existence check.
     checkAccountExists wrk = do
         let minIx = getIndex (minBound :: Index 'Hardened 'AccountK)
         if accountIxW == minIx
             then pure ()  -- 0H is always present
             else do
                 accounts <- lift $ listWalletAccounts wrk
-                unless (accountIxW `elem` accounts)
+                unless ((accountIxW - minIx) `elem` accounts)
                     $ throwE ErrGetAccountNotFound
     fromChangeAddressMode = \case
         SingleChangeAddress -> AccountModeSingleAddress
@@ -1198,7 +1196,7 @@ getWalletAccountUtxoStatistics ctx (ApiT wid) (ApiT (DerivationIndex accountIxW)
             then pure ()
             else do
                 accounts <- lift $ listWalletAccounts wrk
-                unless (accountIxW `elem` accounts)
+                unless ((accountIxW - minIx) `elem` accounts)
                     $ throwE ErrGetAccountNotFound
 
 -- | Set the address-derivation mode for a specific account and return the
@@ -1250,13 +1248,13 @@ listWalletAccountsH ctx (ApiT wid) =
                 cp
         accounts <- liftIO $ listWalletAccounts wrk
         let minIx = getIndex (minBound :: Index 'Hardened 'AccountK)
-            toHardenedIx w = if w == 0 then minIx else w
+            toHardenedIx w = w + minIx
         accountList <- liftIO $ forM accounts $ \w -> do
             let w' = toHardenedIx w
             mode <- if w' == minIx
                 then pure $ fromChangeAddressMode $ Seq.changeAddressMode (getState cp)
                 else do
-                    mSt <- db & \W.DBLayer{..} -> atomically $ readSeqStateForAccount w'
+                    mSt <- db & \W.DBLayer{..} -> atomically $ readSeqStateForAccount w
                     pure $ maybe AccountModeHD (fromChangeAddressMode . Seq.changeAddressMode) mSt
             utxo <- readAccountUTxO wrk (Index w')
             let acctBal = UTxO.balance utxo
@@ -1348,7 +1346,7 @@ postWalletAccountConsolidateH ctx@ApiLayer{..} (ApiT wid) (ApiT (DerivationIndex
                 then do
                     cp <- db & \W.DBLayer{..} -> atomically readCheckpoint
                     pure (Just (getState cp))
-                else db & \W.DBLayer{..} -> atomically $ readSeqStateForAccount accountIxW
+                else db & \W.DBLayer{..} -> atomically $ readSeqStateForAccount (accountIxW - getIndex (minBound :: Index 'Hardened 'AccountK))
         plan <- liftIO $ createAccountMigrationPlan wrk accountIx
         ttl <- liftIO $ W.transactionExpirySlot ti Nothing
         pp <- liftIO $ NW.currentProtocolParameters netLayer
@@ -3351,10 +3349,8 @@ listWalletAccountTransactionsH
   where
     defaultSortOrder :: SortOrder
     defaultSortOrder = Descending
-    -- Account 0H is stored with DB index 0 (from the initial insertPrologue).
-    -- Extra accounts (1H, 2H, …) are stored with their raw hardened index.
     minIx = getIndex (minBound :: Index 'Hardened 'AccountK)
-    dbAcctIx = if accountIxW == minIx then 0 else accountIxW
+    dbAcctIx = accountIxW - minIx
 
 listTransactions
     :: forall s n

@@ -3266,7 +3266,7 @@ buildSignSubmitAccountTransaction
                             Write.RecentEraConway -> Read.EraValue Read.Conway
                             Write.RecentEraDijkstra -> Read.EraValue Read.Dijkstra
                     mAccountSeqSt <-
-                        atomically $ readSeqStateForAccount (getIndex accountIx)
+                        atomically $ readSeqStateForAccount (softAccountIx accountIx)
                     accountSeqSt <- case mAccountSeqSt of
                         Nothing ->
                             throwIO $ userError
@@ -5311,7 +5311,7 @@ setChangeAddressModeForAccount ctx accountIx mode
                         [InsertExtraPrologue accountIxW (SeqPrologue (st & #changeAddressMode .~ mode))]
   where
     db = ctx ^. dbLayer
-    accountIxW = getIndex accountIx
+    accountIxW = softAccountIx accountIx
 
 setChangeAddressModeShared
     :: forall s n
@@ -5437,7 +5437,7 @@ addWalletAccount ctx accountIx pwd =
     db = ctx ^. dbLayer
     tr = contramap MsgWallet (logger_ ctx)
     kF = keyFlavorFromState @s
-    accountIxW = getIndex accountIx
+    accountIxW = softAccountIx accountIx
 
 -- | List all account indices registered for a Shelley wallet.
 listWalletAccounts
@@ -5448,6 +5448,11 @@ listWalletAccounts ctx =
     db & \DBLayer{..} -> atomically listSeqAccounts
   where
     db = ctx ^. dbLayer
+
+-- | Convert a hardened account index to the DB account index by stripping the
+-- hardened bit. The DB stores account 0H as 0, 1H as 1, 2H as 2, etc.
+softAccountIx :: Index 'Hardened 'AccountK -> Word32
+softAccountIx ix = getIndex ix - getIndex (minBound :: Index 'Hardened 'AccountK)
 
 -- | Delete the account at @accountIx@ from a Shelley wallet.
 -- Returns 'ErrDeleteAccountIsDefault' when @accountIx == minBound@ (0H).
@@ -5468,7 +5473,7 @@ deleteWalletAccount ctx accountIx = do
             $ \_ -> [DeleteExtraPrologue accountIxW]
   where
     db = ctx ^. dbLayer
-    accountIxW = getIndex accountIx
+    accountIxW = softAccountIx accountIx
 
 -- | Error returned when looking up a specific wallet account fails.
 data ErrGetAccount = ErrGetAccountNotFound
@@ -5489,7 +5494,7 @@ readAccountUTxO ctx accountIx
     | accountIx == minBound = defaultAccountUTxO
     | otherwise = do
         mSt <- db & \DBLayer{..} ->
-            atomically $ readSeqStateForAccount (getIndex accountIx)
+            atomically $ readSeqStateForAccount (softAccountIx accountIx)
         case mSt of
             Nothing -> pure UTxO.empty
             Just seqSt -> do
@@ -5537,7 +5542,7 @@ listAccountAddresses ctx normalize accountIx
             $ knownAddresses s
     | otherwise = do
         mSt <- db & \DBLayer{..} ->
-            atomically $ readSeqStateForAccount (getIndex accountIx)
+            atomically $ readSeqStateForAccount (softAccountIx accountIx)
         case mSt of
             Nothing -> return []
             Just seqSt ->
