@@ -52,6 +52,7 @@ import Cardano.Wallet.Address.Derivation
     )
 import Cardano.Wallet.Api.Types
     ( ApiAddress
+    , ApiAccountIndex (..)
     , ApiAddressData
     , ApiAddressInspectData
     , ApiBalanceTransactionPostData
@@ -313,6 +314,27 @@ instance Malformed (PathParam (ApiT DerivationIndex)) where
             \(e.g. '1815H' or '44'). \
             \Indexes without suffixes are called 'Soft' \
             \Indexes with suffixes are called 'Hardened'."
+
+instance Wellformed (PathParam ApiAccountIndex) where
+    wellformed =
+        PathParam
+            <$> [ "0"
+                , "1"
+                , "1000"
+                ]
+
+instance Malformed (PathParam ApiAccountIndex) where
+    malformed =
+        first PathParam
+            <$> [ ("patate", msgMalformed)
+                , ("💩", msgMalformed)
+                , ("-1", msgMalformed)
+                , ("0H", msgMalformed)
+                , ("1H", msgMalformed)
+                ]
+      where
+        msgMalformed =
+            "account index must be a non-negative integer"
 
 instance Wellformed (PathParam (ApiT TokenPolicyId)) where
     wellformed = [PathParam $ T.replicate 56 "0"]
@@ -1640,22 +1662,22 @@ instance Malformed (BodyParam ApiPostAccount) where
                         )
                     ,
                         ( [aesonQQ| { "account_index": "0H" }|]
+                        , "Error in $['account_index']: parsing Word32 failed, expected Number, but encountered String"
+                        )
+                    ,
+                        ( [aesonQQ| { "account_index": 0 }|]
                         , "Error in $: must provide either 'passphrase' or 'account_public_key'"
                         )
                     ,
-                        ( [aesonQQ| { "account_index": "0H", "passphrase": #{wPassphrase}, "account_public_key": #{accountPublicKeyValid} }|]
+                        ( [aesonQQ| { "account_index": 0, "passphrase": #{wPassphrase}, "account_public_key": #{accountPublicKeyValid} }|]
                         , "Error in $: cannot provide both 'passphrase' and 'account_public_key'"
                         )
                     ,
-                        ( [aesonQQ| { "account_index": "0H", "passphrase": 123 }|]
+                        ( [aesonQQ| { "account_index": 0, "passphrase": 123 }|]
                         , "Error in $.passphrase: parsing Passphrase failed, expected String, but encountered Number"
                         )
                     ,
-                        ( [aesonQQ| { "account_index": 0, "passphrase": #{wPassphrase} }|]
-                        , "Error in $['account_index']: parsing DerivationIndex failed, expected String, but encountered Number"
-                        )
-                    ,
-                        ( [aesonQQ| { "account_index": "0H", "passphrase": #{nameTooLong} }|]
+                        ( [aesonQQ| { "account_index": 0, "passphrase": #{nameTooLong} }|]
                         , "Error in $.passphrase: passphrase is too long: expected at most 255 characters"
                         )
                     ]

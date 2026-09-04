@@ -153,6 +153,9 @@ module Cardano.Wallet.Api.Types
     , ApiVerificationKeyShelley (..)
     , AccountMode (..)
     , ApiAccount (..)
+    , ApiAccountIndex (..)
+    , apiAccountIndexToHardened
+    , hardenedToApiAccountIndex
     , ApiConsolidateRequest (..)
     , ApiPostAccount (..)
     , ApiSetAccountMode (..)
@@ -303,6 +306,7 @@ import Cardano.Pool.Types
 import Cardano.Wallet.Address.Derivation
     ( Depth (..)
     , DerivationIndex (..)
+    , DerivationType (..)
     , Index (..)
     )
 import Cardano.Wallet.Address.Discovery.Random
@@ -689,6 +693,10 @@ import qualified Data.ByteString.Char8 as B8
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.List as L
 import qualified Data.Map as Map
+import Text.Read
+    ( readMaybe
+    )
+
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import qualified Data.Text.Read as T
@@ -1007,8 +1015,39 @@ data AccountMode
     deriving (FromJSON, ToJSON) via DefaultSum AccountMode
     deriving anyclass (NFData)
 
+-- | Account index as a plain non-negative integer in the API.
+-- Account N corresponds to hardened derivation path m/1852'/1815'/N'.
+-- The hardened bit is implicit — callers use 0, 1, 2, not 0H, 1H, 2H.
+newtype ApiAccountIndex = ApiAccountIndex {getApiAccountIndex :: Word32}
+    deriving (Eq, Ord, Show, Generic)
+    deriving anyclass (NFData)
+
+instance FromJSON ApiAccountIndex where
+    parseJSON v = ApiAccountIndex <$> parseJSON v
+
+instance ToJSON ApiAccountIndex where
+    toJSON (ApiAccountIndex w) = toJSON w
+
+instance FromHttpApiData ApiAccountIndex where
+    parseUrlPiece t = case readMaybe (T.unpack t) of
+        Just w  -> Right (ApiAccountIndex w)
+        Nothing -> Left "account index must be a non-negative integer"
+
+instance ToHttpApiData ApiAccountIndex where
+    toUrlPiece (ApiAccountIndex w) = T.pack (show w)
+
+-- | Convert plain API account index to hardened index.
+apiAccountIndexToHardened :: ApiAccountIndex -> Index 'Hardened 'AccountK
+apiAccountIndexToHardened (ApiAccountIndex w) =
+    Index (w + getIndex (minBound :: Index 'Hardened 'AccountK))
+
+-- | Convert hardened index to plain API account index.
+hardenedToApiAccountIndex :: Index 'Hardened 'AccountK -> ApiAccountIndex
+hardenedToApiAccountIndex ix =
+    ApiAccountIndex (getIndex ix - getIndex (minBound :: Index 'Hardened 'AccountK))
+
 data ApiAccount = ApiAccount
-    { accountIndex :: !(ApiT DerivationIndex)
+    { accountIndex :: !ApiAccountIndex
     , balance :: !ApiWalletBalance
     , assets :: !ApiWalletAssetsBalance
     , delegation :: !ApiWalletDelegation
@@ -1023,7 +1062,7 @@ data ApiAccount = ApiAccount
     deriving anyclass (NFData)
 
 data ApiPostAccount = ApiPostAccount
-    { accountIndex :: ApiT DerivationIndex
+    { accountIndex :: ApiAccountIndex
     , passphrase :: Maybe (ApiT (Passphrase "user"))
     , accountPublicKey :: Maybe ApiAccountPublicKey
     }

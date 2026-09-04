@@ -3864,7 +3864,14 @@ components:
       required:
         - account_index
       properties:
-        account_index: *derivationSegment
+        account_index:
+          description: |
+            Account index as a plain non-negative integer. Account N corresponds
+            to hardened derivation path m/1852'/1815'/N'. The hardened bit is
+            implicit — callers use 0, 1, 2, not 0H, 1H, 2H.
+          type: integer
+          minimum: 0
+          example: 1
         passphrase: *walletPassphrase
         account_public_key:
           type: string
@@ -3907,7 +3914,13 @@ components:
         - state
         - tip
       properties:
-        account_index: *derivationSegment
+        account_index:
+          description: |
+            Account index as a plain non-negative integer (e.g. 0, 1, 3).
+            Corresponds to hardened derivation path account N (N').
+          type: integer
+          minimum: 0
+          example: 1
         balance: *walletBalance
         assets: *walletAssetsBalance
         delegation: *ApiWalletDelegation

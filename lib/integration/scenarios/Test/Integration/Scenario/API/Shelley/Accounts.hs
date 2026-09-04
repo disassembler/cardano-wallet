@@ -10,14 +10,11 @@ module Test.Integration.Scenario.API.Shelley.Accounts
     ( spec
     ) where
 
-import Cardano.Wallet.Address.Derivation
-    ( DerivationIndex (..)
-    )
 import Cardano.Wallet.Api.Types
     ( AccountMode (..)
     , ApiAccount
+    , ApiAccountIndex (..)
     , ApiAddressWithPath
-    , ApiT (..)
     , ApiTransaction
     )
 import Cardano.Wallet.Primitive.NetworkId
@@ -70,13 +67,13 @@ import qualified Cardano.Wallet.Api.Link as Link
 import qualified Network.HTTP.Types.Status as HTTP
 import Prelude
 
--- | Account 0H raw index (hardened, first account).
-acct0H :: ApiT DerivationIndex
-acct0H = ApiT (DerivationIndex 0x80000000)
+-- | Account 0 plain index (corresponds to hardened derivation path account 0H).
+acct0H :: ApiAccountIndex
+acct0H = ApiAccountIndex 0
 
--- | Account 1H raw index (hardened, second account).
-acct1H :: ApiT DerivationIndex
-acct1H = ApiT (DerivationIndex 0x80000001)
+-- | Account 1 plain index (corresponds to hardened derivation path account 1H).
+acct1H :: ApiAccountIndex
+acct1H = ApiAccountIndex 1
 
 spec :: forall n. HasSNetworkId n => SpecWith Context
 spec = describe "SHELLEY_ACCOUNTS" $ do
@@ -224,7 +221,7 @@ spec = describe "SHELLEY_ACCOUNTS" $ do
             -- 4. Add account 1H.
             rPost1H <-
                 request @ApiAccount ctx (Link.postWalletAccount w) Default
-                    (Json [json|{"account_index": "1H", "passphrase": #{fixturePassphrase}}|])
+                    (Json [json|{"account_index": 1, "passphrase": #{fixturePassphrase}}|])
             verify rPost1H [expectResponseCode HTTP.status201]
 
             -- 5. Switch 1H to single-address mode.
@@ -338,7 +335,7 @@ spec = describe "SHELLEY_ACCOUNTS" $ do
             -- 1. Create account 1H.
             rPost1H <-
                 request @ApiAccount ctx (Link.postWalletAccount w) Default
-                    (Json [json|{"account_index": "1H", "passphrase": #{fixturePassphrase}}|])
+                    (Json [json|{"account_index": 1, "passphrase": #{fixturePassphrase}}|])
             verify rPost1H [expectResponseCode HTTP.status201]
 
             -- 2. Get 1H's receive address.

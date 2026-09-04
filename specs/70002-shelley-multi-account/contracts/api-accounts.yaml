@@ -25,12 +25,13 @@ components:
       properties:
         account_index:
           description: |
-            Hardened account index to create, e.g. "0H", "1H", "3H".
-            Any valid hardened BIP-32 index is accepted. Indices need not
-            be sequential — you may create "5H" without creating "1H"–"4H".
-          type: string
-          pattern: "^[0-9]+'?H$"
-          example: "1H"
+            Account index as a plain non-negative integer. Account N corresponds
+            to hardened derivation path m/1852'/1815'/N'. The hardened bit is
+            implicit — callers use 0, 1, 2, not 0H, 1H, 2H. Indices need not
+            be sequential — you may create 5 without creating 1–4.
+          type: integer
+          minimum: 0
+          example: 1
         passphrase:
           description: |
             Wallet passphrase for software wallets. Provide this to derive the
@@ -56,9 +57,12 @@ components:
         - tip
       properties:
         account_index:
-          description: Hardened account index, e.g. "0H", "1H", "3H".
-          type: string
-          example: "1H"
+          description: |
+            Account index as a plain non-negative integer (e.g. 0, 1, 3).
+            Corresponds to hardened derivation path account N (N').
+          type: integer
+          minimum: 0
+          example: 1
         balance:
           description: Balance summary for this account only (never aggregated across accounts).
           $ref: "#/components/schemas/ApiWalletBalance"
@@ -146,12 +150,13 @@ components:
       in: path
       required: true
       description: |
-        A hardened account derivation index. Must include the "H" suffix.
-        Examples: "0H", "1H", "3H", "100H".
+        A plain non-negative integer account index.
+        Account N corresponds to hardened derivation path N'.
+        Examples: 0, 1, 3, 100.
       schema:
-        type: string
-        pattern: "^[0-9]+H$"
-      example: "1H"
+        type: integer
+        minimum: 0
+      example: 1
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -168,8 +173,8 @@ paths:
         specifies the desired account index. Any valid hardened index may be
         used — indices do not need to be sequential.
 
-        Account 0H is automatically created when the wallet is restored and
-        is always present; attempting to POST 0H returns 409 Conflict.
+        Account 0 is automatically created when the wallet is restored and
+        is always present; attempting to POST 0 returns 409 Conflict.
 
         After creation, the account immediately begins on-chain address
         discovery for that derivation path. The `state` field in the response
@@ -252,7 +257,7 @@ paths:
         Remove an account from the wallet. All address discovery state, UTXO
         data, and transaction history for this account are permanently deleted.
 
-        Account 0H cannot be deleted and returns 403 Forbidden.
+        Account 0 cannot be deleted and returns 403 Forbidden.
         Accounts with a non-zero balance may be deleted (no balance check is
         enforced — the caller is responsible for moving funds beforehand).
       parameters:

@@ -111,6 +111,7 @@ import Cardano.Wallet.Api.Types
     , AddressAmountNoAssets (..)
     , AnyAddress (..)
     , ApiAccount (..)
+    , ApiAccountIndex (..)
     , ApiAccountKey (..)
     , ApiAccountKeyShared (..)
     , ApiAccountPublicKey (..)
@@ -3020,6 +3021,9 @@ instance Arbitrary HealthCheckSMASH where
 instance Arbitrary ApiHealthCheck where
     arbitrary = genericArbitrary
     shrink = genericShrink
+
+instance Arbitrary ApiAccountIndex where
+    arbitrary = ApiAccountIndex <$> arbitrary
 
 instance Arbitrary ApiPostAccount where
     arbitrary = do

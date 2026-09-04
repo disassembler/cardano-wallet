@@ -146,6 +146,7 @@ import Cardano.Wallet.Address.Discovery.Shared
     )
 import Cardano.Wallet.Api.Types
     ( ApiAddress (..)
+    , ApiAccountIndex (..)
     , ApiAddressInspectData (..)
     , ApiDRepSpecifier
     , ApiPoolSpecifier
@@ -427,7 +428,7 @@ getWalletAccount
     :: forall w
      . HasType (ApiT WalletId) w
     => w
-    -> ApiT DerivationIndex
+    -> ApiAccountIndex
     -> (Method, Text)
 getWalletAccount w idx =
     endpoint @Api.GetWalletAccount (\mk -> mk wid idx)
@@ -438,7 +439,7 @@ listWalletAccountAddresses
     :: forall w
      . HasType (ApiT WalletId) w
     => w
-    -> ApiT DerivationIndex
+    -> ApiAccountIndex
     -> (Method, Text)
 listWalletAccountAddresses w idx =
     endpoint @(Api.ListWalletAccountAddresses Net) (\mk -> mk wid idx Nothing)
@@ -449,7 +450,7 @@ createWalletAccountTransaction
     :: forall w
      . HasType (ApiT WalletId) w
     => w
-    -> ApiT DerivationIndex
+    -> ApiAccountIndex
     -> (Method, Text)
 createWalletAccountTransaction w idx =
     endpoint @(Api.CreateWalletAccountTransaction Net) (\mk -> mk wid idx)
@@ -460,7 +461,7 @@ listWalletAccountTransactions
     :: forall w
      . HasType (ApiT WalletId) w
     => w
-    -> ApiT DerivationIndex
+    -> ApiAccountIndex
     -> (Method, Text)
 listWalletAccountTransactions w idx =
     endpoint @(Api.ListWalletAccountTransactions Net)
@@ -473,7 +474,7 @@ putWalletAccountMode
     :: forall w
      . HasType (ApiT WalletId) w
     => w
-    -> ApiT DerivationIndex
+    -> ApiAccountIndex
     -> (Method, Text)
 putWalletAccountMode w idx =
     endpoint @Api.PutWalletAccountMode (\mk -> mk wid idx)
@@ -484,7 +485,7 @@ postWalletAccountConsolidate
     :: forall w
      . HasType (ApiT WalletId) w
     => w
-    -> ApiT DerivationIndex
+    -> ApiAccountIndex
     -> (Method, Text)
 postWalletAccountConsolidate w idx =
     endpoint @(Api.PostWalletAccountConsolidate Net) (\mk -> mk wid idx)

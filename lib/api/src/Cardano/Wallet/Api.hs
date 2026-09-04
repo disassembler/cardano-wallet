@@ -187,6 +187,7 @@ import Cardano.Wallet.Address.Derivation
 import Cardano.Wallet.Api.Types
     ( AnyAddress
     , ApiAccount
+    , ApiAccountIndex
     , ApiAccountKey
     , ApiAccountKeyShared
     , ApiAddressData
@@ -522,21 +523,21 @@ type GetWalletAccount =
     "wallets"
         :> Capture "walletId" (ApiT WalletId)
         :> "accounts"
-        :> Capture "accountIndex" (ApiT DerivationIndex)
+        :> Capture "accountIndex" ApiAccountIndex
         :> Get '[JSON] ApiAccount
 
 type DeleteWalletAccount =
     "wallets"
         :> Capture "walletId" (ApiT WalletId)
         :> "accounts"
-        :> Capture "accountIndex" (ApiT DerivationIndex)
+        :> Capture "accountIndex" ApiAccountIndex
         :> DeleteNoContent
 
 type ListWalletAccountAddresses n =
     "wallets"
         :> Capture "walletId" (ApiT WalletId)
         :> "accounts"
-        :> Capture "accountIndex" (ApiT DerivationIndex)
+        :> Capture "accountIndex" ApiAccountIndex
         :> "addresses"
         :> QueryParam "state" (ApiT AddressState)
         :> Get '[JSON] [ApiAddressT n]
@@ -545,7 +546,7 @@ type GetWalletAccountUTxOsStatistics =
     "wallets"
         :> Capture "walletId" (ApiT WalletId)
         :> "accounts"
-        :> Capture "accountIndex" (ApiT DerivationIndex)
+        :> Capture "accountIndex" ApiAccountIndex
         :> "statistics"
         :> "utxos"
         :> Get '[JSON] ApiUtxoStatistics
@@ -554,7 +555,7 @@ type CreateWalletAccountTransaction n =
     "wallets"
         :> Capture "walletId" (ApiT WalletId)
         :> "accounts"
-        :> Capture "accountIndex" (ApiT DerivationIndex)
+        :> Capture "accountIndex" ApiAccountIndex
         :> "transactions"
         :> ReqBody '[JSON] (PostTransactionOldDataT n)
         :> PostAccepted '[JSON] (ApiTransactionT n)
@@ -563,7 +564,7 @@ type ListWalletAccountTransactions n =
     "wallets"
         :> Capture "walletId" (ApiT WalletId)
         :> "accounts"
-        :> Capture "accountIndex" (ApiT DerivationIndex)
+        :> Capture "accountIndex" ApiAccountIndex
         :> "transactions"
         :> QueryParam "minWithdrawal" MinWithdrawal
         :> QueryParam "start" Iso8601Time
@@ -578,7 +579,7 @@ type PutWalletAccountMode =
     "wallets"
         :> Capture "walletId" (ApiT WalletId)
         :> "accounts"
-        :> Capture "accountIndex" (ApiT DerivationIndex)
+        :> Capture "accountIndex" ApiAccountIndex
         :> "mode"
         :> ReqBody '[JSON] ApiSetAccountMode
         :> Put '[JSON] ApiAccount
@@ -587,7 +588,7 @@ type PostWalletAccountConsolidate n =
     "wallets"
         :> Capture "walletId" (ApiT WalletId)
         :> "accounts"
-        :> Capture "accountIndex" (ApiT DerivationIndex)
+        :> Capture "accountIndex" ApiAccountIndex
         :> "utxo"
         :> "consolidate"
         :> ReqBody '[JSON] ApiConsolidateRequest

@@ -380,6 +380,7 @@ import Cardano.Wallet.Api.Types
     , AccountPostData (..)
     , AddressAmount (..)
     , ApiAccount (..)
+    , ApiAccountIndex (..)
     , ApiPostAccount (..)
     , AddressAmountNoAssets (..)
     , ApiAccountPublicKey (..)
@@ -389,6 +390,8 @@ import Cardano.Wallet.Api.Types
     , ApiConsolidateRequest (..)
     , ApiSetAccountMode (..)
     , ApiAnyCertificate (..)
+    , apiAccountIndexToHardened
+    , hardenedToApiAccountIndex
     , ApiAsArray (..)
     , ApiAsset (..)
     , ApiAssetMintBurn (..)
@@ -1068,7 +1071,7 @@ postWalletAccount ctx (ApiT wid) body =
                 cp
         pure
             ApiAccount
-                { accountIndex = ApiT $ DerivationIndex $ getIndex accountIx
+                { accountIndex = hardenedToApiAccountIndex accountIx
                 , balance =
                     ApiWalletBalance
                         { available = ApiAmount.fromCoin (Coin 0)
@@ -1098,7 +1101,7 @@ postWalletAccount ctx (ApiT wid) body =
                 , tip = tip'
                 }
   where
-    accountIx = Index $ getDerivationIndex $ getApiT $ body ^. #accountIndex
+    accountIx = apiAccountIndexToHardened (body ^. #accountIndex)
 
 getWalletAccount
     :: forall ctx s n k
@@ -1109,33 +1112,33 @@ getWalletAccount
        )
     => ctx
     -> ApiT WalletId
-    -> ApiT DerivationIndex
+    -> ApiAccountIndex
     -> Handler ApiAccount
-getWalletAccount ctx (ApiT wid) (ApiT (DerivationIndex accountIxW)) =
+getWalletAccount ctx (ApiT wid) apiAcctIdx@(ApiAccountIndex w) =
     withWorkerCtx @_ @s ctx wid liftE liftE $ \wrk -> do
         liftHandler $ checkAccountExists wrk
         (cp, _, _) <- handler $ readWallet wrk
         progress <- liftIO $ walletSyncProgress @_ @_ ctx cp
         let ti = timeInterpreter (ctx ^. networkLayer)
             db = wrk ^. W.dbLayer
-            minIx = getIndex (minBound :: Index 'Hardened 'AccountK)
+            accountIxW = getIndex (apiAccountIndexToHardened apiAcctIdx)
         tip' <- liftIO
             $ getWalletTip
                 (neverFails "getWalletTip for getWalletAccount" ti)
                 cp
-        mode <- liftIO $ if accountIxW == minIx
+        mode <- liftIO $ if w == 0
             then pure $ fromChangeAddressMode $ Seq.changeAddressMode (getState cp)
             else do
-                mSt <- db & \W.DBLayer{..} -> atomically $ readSeqStateForAccount (accountIxW - minIx)
+                mSt <- db & \W.DBLayer{..} -> atomically $ readSeqStateForAccount w
                 pure $ maybe AccountModeHD (fromChangeAddressMode . Seq.changeAddressMode) mSt
         utxo <- liftIO $ readAccountUTxO wrk (Index accountIxW)
         let acctBal = UTxO.balance utxo
-        reward <- liftIO $ if accountIxW == minIx
+        reward <- liftIO $ if w == 0
             then W.fetchRewardBalance @s $ wrk ^. W.dbLayer
             else pure (Coin 0)
         pure
             ApiAccount
-                { accountIndex = ApiT (DerivationIndex accountIxW)
+                { accountIndex = apiAcctIdx
                 , balance =
                     ApiWalletBalance
                         { available = ApiAmount.fromCoin (acctBal ^. #coin)
@@ -1166,12 +1169,11 @@ getWalletAccount ctx (ApiT wid) (ApiT (DerivationIndex accountIxW)) =
                 }
   where
     checkAccountExists wrk = do
-        let minIx = getIndex (minBound :: Index 'Hardened 'AccountK)
-        if accountIxW == minIx
-            then pure ()  -- 0H is always present
+        if w == 0
+            then pure ()  -- account 0 is always present
             else do
                 accounts <- lift $ listWalletAccounts wrk
-                unless ((accountIxW - minIx) `elem` accounts)
+                unless (w `elem` accounts)
                     $ throwE ErrGetAccountNotFound
     fromChangeAddressMode = \case
         SingleChangeAddress -> AccountModeSingleAddress
@@ -1187,21 +1189,21 @@ getWalletAccountUtxoStatistics
        )
     => ctx
     -> ApiT WalletId
-    -> ApiT DerivationIndex
+    -> ApiAccountIndex
     -> Handler ApiUtxoStatistics
-getWalletAccountUtxoStatistics ctx (ApiT wid) (ApiT (DerivationIndex accountIxW)) =
+getWalletAccountUtxoStatistics ctx (ApiT wid) apiAcctIdx@(ApiAccountIndex w) =
     withWorkerCtx @_ @s ctx wid liftE liftE $ \wrk -> do
         liftHandler $ checkAccountExists wrk
+        let accountIxW = getIndex (apiAccountIndexToHardened apiAcctIdx)
         stats <- liftIO $ listAccountUtxoStatistics wrk (Index accountIxW)
         pure $ toApiUtxoStatistics stats
   where
     checkAccountExists wrk = do
-        let minIx = getIndex (minBound :: Index 'Hardened 'AccountK)
-        if accountIxW == minIx
+        if w == 0
             then pure ()
             else do
                 accounts <- lift $ listWalletAccounts wrk
-                unless ((accountIxW - minIx) `elem` accounts)
+                unless (w `elem` accounts)
                     $ throwE ErrGetAccountNotFound
 
 -- | Set the address-derivation mode for a specific account and return the
@@ -1217,12 +1219,12 @@ putWalletAccountModeH
        )
     => ctx
     -> ApiT WalletId
-    -> ApiT DerivationIndex
+    -> ApiAccountIndex
     -> ApiSetAccountMode
     -> Handler ApiAccount
-putWalletAccountModeH ctx (ApiT wid) idx@(ApiT (DerivationIndex accountIxW)) body = do
+putWalletAccountModeH ctx (ApiT wid) idx body = do
     withWorkerCtx @_ @s ctx wid liftE liftE $ \wrk -> do
-        let accountIx = Index accountIxW :: Index 'Hardened 'AccountK
+        let accountIx = apiAccountIndexToHardened idx
             newMode = toChangeAddressMode (body ^. #mode)
         liftIO $ setChangeAddressModeForAccount wrk accountIx newMode
     getWalletAccount ctx (ApiT wid) idx
@@ -1253,21 +1255,20 @@ listWalletAccountsH ctx (ApiT wid) =
                 cp
         accounts <- liftIO $ listWalletAccounts wrk
         let minIx = getIndex (minBound :: Index 'Hardened 'AccountK)
-            toHardenedIx w = w + minIx
         accountList <- liftIO $ forM accounts $ \w -> do
-            let w' = toHardenedIx w
-            mode <- if w' == minIx
+            let w' = w + minIx
+            mode <- if w == 0
                 then pure $ fromChangeAddressMode $ Seq.changeAddressMode (getState cp)
                 else do
                     mSt <- db & \W.DBLayer{..} -> atomically $ readSeqStateForAccount w
                     pure $ maybe AccountModeHD (fromChangeAddressMode . Seq.changeAddressMode) mSt
             utxo <- readAccountUTxO wrk (Index w')
             let acctBal = UTxO.balance utxo
-            reward <- if w' == minIx
+            reward <- if w == 0
                 then W.fetchRewardBalance @s $ wrk ^. W.dbLayer
                 else pure (Coin 0)
             pure ApiAccount
-                { accountIndex = ApiT (DerivationIndex w')
+                { accountIndex = ApiAccountIndex w
                 , balance =
                     ApiWalletBalance
                         { available = ApiAmount.fromCoin (acctBal ^. #coin)
@@ -1310,13 +1311,13 @@ deleteWalletAccountH
      . ctx ~ ApiLayer s
     => ctx
     -> ApiT WalletId
-    -> ApiT DerivationIndex
+    -> ApiAccountIndex
     -> Handler NoContent
-deleteWalletAccountH ctx (ApiT wid) (ApiT (DerivationIndex accountIxW)) =
+deleteWalletAccountH ctx (ApiT wid) apiAcctIdx =
     withWorkerCtx @_ @s ctx wid liftE liftE $ \wrk -> do
         liftHandler
             $ deleteWalletAccount wrk
-            $ (Index accountIxW :: Index 'Hardened 'AccountK)
+            $ apiAccountIndexToHardened apiAcctIdx
         return NoContent
 
 -- | Consolidate all UTxOs in a specific account into fewer entries.
@@ -1337,21 +1338,21 @@ postWalletAccountConsolidateH
        )
     => ctx
     -> ApiT WalletId
-    -> ApiT DerivationIndex
+    -> ApiAccountIndex
     -> ApiConsolidateRequest
     -> Handler [ApiTransaction n]
-postWalletAccountConsolidateH ctx@ApiLayer{..} (ApiT wid) (ApiT (DerivationIndex accountIxW)) body =
+postWalletAccountConsolidateH ctx@ApiLayer{..} (ApiT wid) apiAcctIdx@(ApiAccountIndex w) body =
     withWorkerCtx ctx wid liftE liftE $ \wrk -> do
         let db = wrk ^. W.dbLayer
             tr = wrk ^. W.logger
-            accountIx = Index accountIxW :: Index 'Hardened 'AccountK
+            accountIx = apiAccountIndexToHardened apiAcctIdx
             pwd = coerce $ getApiT $ body ^. #passphrase
         accountSeqSt <- liftIO $ do
-            if accountIx == minBound
+            if w == 0
                 then do
                     cp <- db & \W.DBLayer{..} -> atomically readCheckpoint
                     pure (Just (getState cp))
-                else db & \W.DBLayer{..} -> atomically $ readSeqStateForAccount (accountIxW - getIndex (minBound :: Index 'Hardened 'AccountK))
+                else db & \W.DBLayer{..} -> atomically $ readSeqStateForAccount w
         plan <- liftIO $ createAccountMigrationPlan wrk accountIx
         ttl <- liftIO $ W.transactionExpirySlot ti Nothing
         pp <- liftIO $ NW.currentProtocolParameters netLayer
@@ -1436,17 +1437,17 @@ createWalletAccountTransactionH
     => ctx
     -> ArgGenChange s
     -> ApiT WalletId
-    -> ApiT DerivationIndex
+    -> ApiAccountIndex
     -> PostTransactionOldData n
     -> Handler (ApiTransaction n)
-createWalletAccountTransactionH ctx argGenChange wid (ApiT (DerivationIndex accountIxW)) body
-    | accountIxW == getIndex (minBound :: Index 'Hardened 'AccountK) =
+createWalletAccountTransactionH ctx argGenChange wid apiAcctIdx@(ApiAccountIndex w) body
+    | w == 0 =
         postTransactionOld ctx argGenChange wid body
     | otherwise = do
         let outs = addressAmountToTxOut <$> body ^. #payments
             md = body ^? #metadata . traverse . #txMetadataWithSchema_metadata
             mTTL = body ^? #timeToLive . traverse . #getQuantity
-            accountIx = Index accountIxW :: Index 'Hardened 'AccountK
+            accountIx = apiAccountIndexToHardened apiAcctIdx
         (Write.PParamsInAnyRecentEra era _, _) <-
             liftIO $ W.readNodeTipStateForTxWrite netLayer
         withWorkerCtx ctx (getApiT wid) liftE liftE $ \wrk -> do
@@ -1521,14 +1522,14 @@ listWalletAccountAddressesH
     => ctx
     -> (s -> Address -> Maybe Address)
     -> ApiT WalletId
-    -> ApiT DerivationIndex
+    -> ApiAccountIndex
     -> Maybe (ApiT AddressState)
     -> Handler [ApiAddressWithPath n]
-listWalletAccountAddressesH ctx normalize (ApiT wid) (ApiT (DerivationIndex accountIxW)) stateFilter =
+listWalletAccountAddressesH ctx normalize (ApiT wid) apiAcctIdx stateFilter =
     withWorkerCtx @_ @s ctx wid liftE liftE $ \wrk -> do
         addrs <- liftIO
             $ listAccountAddresses wrk normalize
-            $ (Index accountIxW :: Index 'Hardened 'AccountK)
+            $ apiAccountIndexToHardened apiAcctIdx
         let filterCondition (_, state, _) = case stateFilter of
                 Nothing -> True
                 Just (ApiT s) -> state == s
@@ -3308,7 +3309,7 @@ listWalletAccountTransactionsH
        )
     => ApiLayer s
     -> ApiT WalletId
-    -> ApiT DerivationIndex
+    -> ApiAccountIndex
     -> Maybe MinWithdrawal
     -> Maybe Iso8601Time
     -> Maybe Iso8601Time
@@ -3320,7 +3321,7 @@ listWalletAccountTransactionsH
 listWalletAccountTransactionsH
     ctx
     (ApiT wid)
-    (ApiT (DerivationIndex accountIxW))
+    (ApiAccountIndex w)
     mMinWithdrawal
     mStart
     mEnd
@@ -3333,7 +3334,7 @@ listWalletAccountTransactionsH
                 liftHandler
                     $ W.listTransactionsForAccount
                         wrk
-                        dbAcctIx
+                        w
                         (Coin . fromIntegral . getMinWithdrawal <$> mMinWithdrawal)
                         (getIso8601Time <$> mStart)
                         (getIso8601Time <$> mEnd)
@@ -3354,8 +3355,6 @@ listWalletAccountTransactionsH
   where
     defaultSortOrder :: SortOrder
     defaultSortOrder = Descending
-    minIx = getIndex (minBound :: Index 'Hardened 'AccountK)
-    dbAcctIx = accountIxW - minIx
 
 listTransactions
     :: forall s n

@@ -2988,10 +2988,17 @@ buildSignSubmitTransaction
                             )
                             $ \s -> do
                                 let wallet = WalletState.getLatest s
+                                    walletSt = getState wallet
+                                    -- Filter to account 0's addresses only: the main wallet
+                                    -- UTxO now contains extra-account UTxOs, but coin selection
+                                    -- must not pick inputs whose signing paths are unknown to
+                                    -- walletSt (account 0H's SeqState).
                                     utxo =
-                                        availableUTxO
-                                            (Set.fromList pendingTxs)
-                                            wallet
+                                        UTxO.filterByAddress
+                                            (\addr -> isJust . fst $ isOurs addr walletSt)
+                                            $ availableUTxO
+                                                (Set.fromList pendingTxs)
+                                                wallet
                                 buildTransactionPure @s
                                     wallet
                                     timeTranslation
@@ -3166,7 +3173,12 @@ buildSignSubmitTransaction
                             )
                                 $ \s -> do
                                     let wallet = WalletState.getLatest s
-                                        utxo = availableUTxO (Set.fromList pendingTxs) wallet
+                                        walletSt = getState wallet
+                                        -- Filter to account 0's addresses only; see V2 path above.
+                                        utxo =
+                                            UTxO.filterByAddress
+                                                (\addr -> isJust . fst $ isOurs addr walletSt)
+                                                $ availableUTxO (Set.fromList pendingTxs) wallet
                                     buildAndSignTransactionPure @k @s
                                         timeTranslation
                                         utxo
