@@ -52,6 +52,7 @@ import Cardano.Wallet.Address.Derivation
     )
 import Cardano.Wallet.Api.Types
     ( ApiAddress
+    , ApiAccountIndex (..)
     , ApiAddressData
     , ApiAddressInspectData
     , ApiBalanceTransactionPostData
@@ -61,8 +62,11 @@ import Cardano.Wallet.Api.Types
     , ApiDecodeTransactionPostData
     , ApiMaintenanceActionPostData
     , ApiPoolSpecifier
+    , ApiConsolidateRequest
+    , ApiPostAccount
     , ApiPostAccountKeyData
     , ApiPostAccountKeyDataWithPurpose
+    , ApiSetAccountMode
     , ApiPostPolicyIdData
     , ApiPostPolicyKeyData
     , ApiPostRandomAddressData
@@ -310,6 +314,27 @@ instance Malformed (PathParam (ApiT DerivationIndex)) where
             \(e.g. '1815H' or '44'). \
             \Indexes without suffixes are called 'Soft' \
             \Indexes with suffixes are called 'Hardened'."
+
+instance Wellformed (PathParam ApiAccountIndex) where
+    wellformed =
+        PathParam
+            <$> [ "0"
+                , "1"
+                , "1000"
+                ]
+
+instance Malformed (PathParam ApiAccountIndex) where
+    malformed =
+        first PathParam
+            <$> [ ("patate", msgMalformed)
+                , ("💩", msgMalformed)
+                , ("-1", msgMalformed)
+                , ("0H", msgMalformed)
+                , ("1H", msgMalformed)
+                ]
+      where
+        msgMalformed =
+            "account index must be a non-negative integer"
 
 instance Wellformed (PathParam (ApiT TokenPolicyId)) where
     wellformed = [PathParam $ T.replicate 56 "0"]
@@ -1610,6 +1635,53 @@ instance Malformed (BodyParam ApiWalletPassphrase) where
                         )
                     ]
 
+instance Malformed (BodyParam ApiPostAccount) where
+    malformed = jsonValid ++ jsonInvalid
+      where
+        jsonInvalid =
+            first BodyParam
+                <$> [
+                        ( "1020344"
+                        , "Error in $: parsing Cardano.Wallet.Api.Types.ApiPostAccount(ApiPostAccount) failed, expected Object, but encountered Number"
+                        )
+                    ,
+                        ( "\"1020344\""
+                        , "Error in $: parsing Cardano.Wallet.Api.Types.ApiPostAccount(ApiPostAccount) failed, expected Object, but encountered String"
+                        )
+                    ,
+                        ( "\"slot_number : \"random\"}"
+                        , "Error in $: parsing Cardano.Wallet.Api.Types.ApiPostAccount(ApiPostAccount) failed, expected Object, but encountered String"
+                        )
+                    , ("{\"name : \"random\"}", "Unexpected 'random\\'}', expecting :")
+                    ]
+        jsonValid =
+            first (BodyParam . Aeson.encode)
+                <$> [
+                        ( [aesonQQ| { "passphrase": #{wPassphrase} }|]
+                        , "Error in $: key 'account_index' not found"
+                        )
+                    ,
+                        ( [aesonQQ| { "account_index": "0H" }|]
+                        , "Error in $['account_index']: parsing Word32 failed, expected Number, but encountered String"
+                        )
+                    ,
+                        ( [aesonQQ| { "account_index": 0 }|]
+                        , "Error in $: must provide either 'passphrase' or 'account_public_key'"
+                        )
+                    ,
+                        ( [aesonQQ| { "account_index": 0, "passphrase": #{wPassphrase}, "account_public_key": #{accountPublicKeyValid} }|]
+                        , "Error in $: cannot provide both 'passphrase' and 'account_public_key'"
+                        )
+                    ,
+                        ( [aesonQQ| { "account_index": 0, "passphrase": 123 }|]
+                        , "Error in $.passphrase: parsing Passphrase failed, expected String, but encountered Number"
+                        )
+                    ,
+                        ( [aesonQQ| { "account_index": 0, "passphrase": #{nameTooLong} }|]
+                        , "Error in $.passphrase: passphrase is too long: expected at most 255 characters"
+                        )
+                    ]
+
 instance Malformed (BodyParam ApiPostAccountKeyData) where
     malformed = jsonValid ++ jsonInvalid
       where
@@ -2514,6 +2586,9 @@ accountPublicKeyTooLong = T.replicate 129 "1"
 accountPublicKeyTooShort :: Text
 accountPublicKeyTooShort = "1"
 
+accountPublicKeyValid :: Text
+accountPublicKeyValid = T.replicate 128 "1"
+
 wName :: Text
 wName =
     "Just a łallet"
@@ -3095,3 +3170,61 @@ putAddressesDataCases =
         , "Error in $: parsing Cardano.Wallet.Api.Types.ApiPutAddressesData(ApiPutAddressesData) failed, key 'addresses' not found"
         )
     ]
+
+instance Malformed (BodyParam ApiSetAccountMode) where
+    malformed = jsonValid ++ jsonInvalid
+      where
+        jsonInvalid =
+            first BodyParam
+                <$> [
+                        ( "1020344"
+                        , "Error in $: parsing Cardano.Wallet.Api.Types.ApiSetAccountMode(ApiSetAccountMode) failed, expected Object, but encountered Number"
+                        )
+                    ,
+                        ( "\"hd\""
+                        , "Error in $: parsing Cardano.Wallet.Api.Types.ApiSetAccountMode(ApiSetAccountMode) failed, expected Object, but encountered String"
+                        )
+                    , ("{\"mode : \"hd\"}", "Unexpected 'hd\\'}', expecting :")
+                    ]
+        jsonValid =
+            first (BodyParam . Aeson.encode)
+                <$> [
+                        ( [aesonQQ| {} |]
+                        , "Error in $: parsing Cardano.Wallet.Api.Types.ApiSetAccountMode(ApiSetAccountMode) failed, key 'mode' not found"
+                        )
+                    ,
+                        ( [aesonQQ| { "mode": "invalid_mode" } |]
+                        , "Error in $.mode: parsing Cardano.Wallet.Api.Types.AccountMode failed, expected one of the tags ['account_mode_hd','account_mode_single_address'], but found tag 'invalid_mode'"
+                        )
+                    ]
+
+instance Malformed (BodyParam ApiConsolidateRequest) where
+    malformed = jsonValid ++ jsonInvalid
+      where
+        jsonInvalid =
+            first BodyParam
+                <$> [
+                        ( "1020344"
+                        , "Error in $: parsing Cardano.Wallet.Api.Types.ApiConsolidateRequest(ApiConsolidateRequest) failed, expected Object, but encountered Number"
+                        )
+                    ,
+                        ( "\"passphrase\""
+                        , "Error in $: parsing Cardano.Wallet.Api.Types.ApiConsolidateRequest(ApiConsolidateRequest) failed, expected Object, but encountered String"
+                        )
+                    , ("{\"passphrase : \"foo\"}", "Unexpected 'foo\\'}', expecting :")
+                    ]
+        jsonValid =
+            first (BodyParam . Aeson.encode)
+                <$> [
+                        ( [aesonQQ| {} |]
+                        , "Error in $: parsing Cardano.Wallet.Api.Types.ApiConsolidateRequest(ApiConsolidateRequest) failed, key 'passphrase' not found"
+                        )
+                    ,
+                        ( [aesonQQ| { "passphrase": 123 } |]
+                        , "Error in $.passphrase: parsing Passphrase failed, expected String, but encountered Number"
+                        )
+                    ,
+                        ( [aesonQQ| { "passphrase": #{nameTooLong} } |]
+                        , "Error in $.passphrase: passphrase is too long: expected at most 255 characters"
+                        )
+                    ]

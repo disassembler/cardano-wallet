@@ -25,6 +25,9 @@ import Cardano.Wallet.DB.Store.Transactions.Model
 import Data.Delta
     ( Delta (..)
     )
+import Data.Word
+    ( Word32
+    )
 import Fmt
     ( Buildable
     , build
@@ -38,7 +41,7 @@ import qualified Cardano.Wallet.Primitive.Types.Tx as WT
 import qualified Cardano.Wallet.Primitive.Types.Tx.TxMeta as WT
 
 data DeltaTxWalletsHistory
-    = ExpandTxWalletsHistory W.WalletId [(WT.Tx, WT.TxMeta)]
+    = ExpandTxWalletsHistory W.WalletId Word32 [(WT.Tx, WT.TxMeta)]
     | -- | Roll back a single wallet
       RollbackTxWalletsHistory W.SlotNo
     deriving (Show, Eq)
@@ -51,9 +54,9 @@ type TxWalletsHistory =
 
 instance Delta DeltaTxWalletsHistory where
     type Base DeltaTxWalletsHistory = TxWalletsHistory
-    apply (ExpandTxWalletsHistory wid cs) (txh, mtxmh) =
+    apply (ExpandTxWalletsHistory wid acctIx cs) (txh, mtxmh) =
         ( apply (TxStore.Append $ mkTxSet $ fst <$> cs) txh
-        , apply (TxMetaStore.Expand $ mkTxMetaHistory wid cs) mtxmh
+        , apply (TxMetaStore.Expand $ mkTxMetaHistory wid acctIx cs) mtxmh
         )
     apply (RollbackTxWalletsHistory slot) (txset, mtxmh) =
         -- Roll back all wallets to a given slot (number)

@@ -3859,6 +3859,79 @@ components:
         format: *keyExtended
         purpose: *derivationSegment
 
+    ApiPostAccount: &ApiPostAccount
+      type: object
+      required:
+        - account_index
+      properties:
+        account_index:
+          description: |
+            Account index as a plain non-negative integer. Account N corresponds
+            to hardened derivation path m/1852'/1815'/N'. The hardened bit is
+            implicit — callers use 0, 1, 2, not 0H, 1H, 2H.
+          type: integer
+          minimum: 0
+          example: 1
+        passphrase: *walletPassphrase
+        account_public_key:
+          type: string
+          format: hex|bech32
+          description: |
+            Account-level public key (64 bytes hex-encoded). Provide this
+            instead of 'passphrase' for hardware wallet accounts where the
+            root key is not available.
+          example: "1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+
+    AccountMode: &AccountMode
+      type: string
+      enum:
+        - account_mode_hd
+        - account_mode_single_address
+
+    ApiSetAccountMode: &ApiSetAccountMode
+      type: object
+      required:
+        - mode
+      properties:
+        mode: *AccountMode
+
+    ApiConsolidateRequest: &ApiConsolidateRequest
+      type: object
+      required:
+        - passphrase
+      properties:
+        passphrase: *walletPassphrase
+
+    ApiAccount: &ApiAccount
+      type: object
+      required:
+        - account_index
+        - balance
+        - assets
+        - delegation
+        - address_pool_gap
+        - address_derivation_mode
+        - state
+        - tip
+      properties:
+        account_index:
+          description: |
+            Account index as a plain non-negative integer (e.g. 0, 1, 3).
+            Corresponds to hardened derivation path account N (N').
+          type: integer
+          minimum: 0
+          example: 1
+        balance: *walletBalance
+        assets: *walletAssetsBalance
+        delegation: *ApiWalletDelegation
+        reward_account_key:
+          type: string
+          description: Bech32-encoded reward account key for this account.
+        address_pool_gap: *walletAddressPoolGap
+        address_derivation_mode: *AccountMode
+        state: *walletState
+        tip: *blockReference
+
     ApiSettingsPutData: &ApiSettingsPutData
       type: object
       properties:
@@ -4486,6 +4559,12 @@ x-parametersRole: &parametersRole
 x-parametersDerivationSegment: &parametersDerivationSegment
   in: path
   name: index
+  required: true
+  schema: *derivationSegment
+
+x-parametersAccountIndex: &parametersAccountIndex
+  in: path
+  name: accountIndex
   required: true
   schema: *derivationSegment
 
@@ -7147,6 +7226,64 @@ x-responsesBalanceTransaction: &responsesBalanceTransaction
       application/json:
         schema: *ApiSerialisedTransaction
 
+x-responsesPostWalletAccount: &responsesPostWalletAccount
+  <<:
+    - *responsesErr400
+    - *responsesErr404WalletNotFound
+    - *responsesErr406
+    - *responsesErr415UnsupportedMediaType
+  409:
+    description: Conflict
+  201:
+    description: Created
+    content:
+      application/json:
+        schema: *ApiAccount
+
+x-responsesListWalletAccounts: &responsesListWalletAccounts
+  <<:
+    - *responsesErr400
+    - *responsesErr404WalletNotFound
+    - *responsesErr406
+  200:
+    description: Ok
+    content:
+      application/json:
+        schema:
+          type: array
+          items: *ApiAccount
+
+x-responsesGetWalletAccount: &responsesGetWalletAccount
+  <<:
+    - *responsesErr400
+    - *responsesErr404WalletNotFound
+    - *responsesErr406
+  200:
+    description: Ok
+    content:
+      application/json:
+        schema: *ApiAccount
+
+x-responsesDeleteWalletAccount: &responsesDeleteWalletAccount
+  <<:
+    - *responsesErr400
+    - *responsesErr404WalletNotFound
+    - *responsesErr406
+  204:
+    description: No Content
+
+x-responsesPutWalletAccountMode: &responsesPutWalletAccountMode
+  <<:
+    - *responsesErr400
+    - *responsesErr404WalletNotFound
+    - *responsesErr406
+    - *responsesErr415UnsupportedMediaType
+  200:
+    description: Ok
+    content:
+      application/json:
+        schema: *ApiAccount
+
 #############################################################################
 #                                                                           #
 #                                  PATHS                                    #
@@ -7581,6 +7718,168 @@ paths:
         - *parametersWalletId
         - *parametersAddressState
       responses: *responsesListAddresses
+
+  /wallets/{walletId}/accounts:
+    post:
+      operationId: postWalletAccount
+      tags: ["Wallets"]
+      summary: Add Account
+      description: |
+        <p align="right">status: <strong>experimental</strong></p>
+
+        Add a new account to a Shelley wallet by hardened account index.
+      parameters:
+        - *parametersWalletId
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: *ApiPostAccount
+      responses: *responsesPostWalletAccount
+
+    get:
+      operationId: listWalletAccounts
+      tags: ["Wallets"]
+      summary: List Accounts
+      description: |
+        <p align="right">status: <strong>experimental</strong></p>
+
+        List all accounts for a Shelley wallet.
+      parameters:
+        - *parametersWalletId
+      responses: *responsesListWalletAccounts
+
+  /wallets/{walletId}/accounts/{accountIndex}:
+    get:
+      operationId: getWalletAccount
+      tags: ["Wallets"]
+      summary: Get Account
+      description: |
+        <p align="right">status: <strong>experimental</strong></p>
+
+        Get a specific account by index.
+      parameters:
+        - *parametersWalletId
+        - *parametersAccountIndex
+      responses: *responsesGetWalletAccount
+
+    delete:
+      operationId: deleteWalletAccount
+      tags: ["Wallets"]
+      summary: Delete Account
+      description: |
+        <p align="right">status: <strong>experimental</strong></p>
+
+        Delete a non-default account from a Shelley wallet.
+      parameters:
+        - *parametersWalletId
+        - *parametersAccountIndex
+      responses: *responsesDeleteWalletAccount
+
+  /wallets/{walletId}/accounts/{accountIndex}/addresses:
+    get:
+      operationId: listWalletAccountAddresses
+      tags: ["Addresses"]
+      summary: List Account Addresses
+      description: |
+        <p align="right">status: <strong>experimental</strong></p>
+
+        List addresses for a specific account.
+      parameters:
+        - *parametersWalletId
+        - *parametersAccountIndex
+        - *parametersAddressState
+      responses: *responsesListAddresses
+
+  /wallets/{walletId}/accounts/{accountIndex}/statistics/utxos:
+    get:
+      operationId: getWalletAccountUTxOsStatistics
+      tags: ["Wallets"]
+      summary: Account UTxO Statistics
+      description: |
+        <p align="right">status: <strong>experimental</strong></p>
+
+        Return UTxO distribution for a specific account.
+      parameters:
+        - *parametersWalletId
+        - *parametersAccountIndex
+      responses: *responsesGetUTxOsStatistics
+
+  /wallets/{walletId}/accounts/{accountIndex}/transactions:
+    post:
+      operationId: postWalletAccountTransaction
+      tags: ["Transactions"]
+      summary: Create Account Transaction
+      description: |
+        <p align="right">status: <strong>experimental</strong></p>
+
+        Create and send a transaction from a specific account.
+      parameters:
+        - *parametersWalletId
+        - *parametersAccountIndex
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: *ApiPostTransactionData
+      responses: *responsesPostTransaction
+
+    get:
+      operationId: listWalletAccountTransactions
+      tags: ["Transactions"]
+      summary: List Account Transactions
+      description: |
+        <p align="right">status: <strong>experimental</strong></p>
+
+        List transactions for a specific account.
+      parameters:
+        - *parametersWalletId
+        - *parametersAccountIndex
+        - *parametersStartDate
+        - *parametersEndDate
+        - *parametersSortOrder
+        - *parametersMaxCount
+        - *parametersMinWithdrawal
+        - *parametersAddress
+      responses: *responsesListTransactions
+
+  /wallets/{walletId}/accounts/{accountIndex}/mode:
+    put:
+      operationId: putWalletAccountMode
+      tags: ["Wallets"]
+      summary: Set Account Mode
+      description: |
+        <p align="right">status: <strong>experimental</strong></p>
+
+        Set the address derivation mode for a specific account.
+      parameters:
+        - *parametersWalletId
+        - *parametersAccountIndex
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: *ApiSetAccountMode
+      responses: *responsesPutWalletAccountMode
+
+  /wallets/{walletId}/accounts/{accountIndex}/utxo/consolidate:
+    post:
+      operationId: postWalletAccountConsolidate
+      tags: ["Transactions"]
+      summary: Consolidate Account UTxOs
+      description: |
+        <p align="right">status: <strong>experimental</strong></p>
+
+        Consolidate UTxOs for a specific account.
+      parameters:
+        - *parametersWalletId
+        - *parametersAccountIndex
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: *ApiConsolidateRequest
+      responses: *responsesPostTransaction
 
   /wallets/{walletId}/keys/{index}:
     post:

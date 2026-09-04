@@ -41,12 +41,23 @@ module Cardano.Wallet.Api.Link
     , getWallet
     , listWallets
     , postWallet
+    , postWalletRescan
     , putWallet
     , putWalletPassphrase
     , getWalletUtxoSnapshot
     , getUTxOsStatistics
     , createMigrationPlan
     , migrateWallet
+
+      -- * Wallet Accounts
+    , postWalletAccount
+    , listWalletAccounts
+    , getWalletAccount
+    , listWalletAccountAddresses
+    , createWalletAccountTransaction
+    , listWalletAccountTransactions
+    , putWalletAccountMode
+    , postWalletAccountConsolidate
 
       -- * WalletKeys
     , getWalletKey
@@ -135,6 +146,7 @@ import Cardano.Wallet.Address.Discovery.Shared
     )
 import Cardano.Wallet.Api.Types
     ( ApiAddress (..)
+    , ApiAccountIndex (..)
     , ApiAddressInspectData (..)
     , ApiDRepSpecifier
     , ApiPoolSpecifier
@@ -261,6 +273,15 @@ deleteWallet w =
   where
     wid = w ^. typed @(ApiT WalletId)
 
+postWalletRescan
+    :: forall w
+     . HasType (ApiT WalletId) w
+    => w
+    -> (Method, Text)
+postWalletRescan w = endpoint @Api.PostWalletRescan (wid &)
+  where
+    wid = w ^. typed @(ApiT WalletId)
+
 getWallet
     :: forall (style :: WalletStyle) w
      . ( Discriminate style
@@ -376,6 +397,98 @@ createMigrationPlan w =
         (endpoint @(Api.CreateShelleyWalletMigrationPlan Net) (wid &))
         (endpoint @(Api.CreateByronWalletMigrationPlan Net) (wid &))
         (notSupported "Shared")
+  where
+    wid = w ^. typed @(ApiT WalletId)
+
+--
+-- Wallet Accounts
+--
+
+postWalletAccount
+    :: forall w
+     . HasType (ApiT WalletId) w
+    => w
+    -> (Method, Text)
+postWalletAccount w =
+    endpoint @Api.PostWalletAccount (wid &)
+  where
+    wid = w ^. typed @(ApiT WalletId)
+
+listWalletAccounts
+    :: forall w
+     . HasType (ApiT WalletId) w
+    => w
+    -> (Method, Text)
+listWalletAccounts w =
+    endpoint @Api.ListWalletAccounts (wid &)
+  where
+    wid = w ^. typed @(ApiT WalletId)
+
+getWalletAccount
+    :: forall w
+     . HasType (ApiT WalletId) w
+    => w
+    -> ApiAccountIndex
+    -> (Method, Text)
+getWalletAccount w idx =
+    endpoint @Api.GetWalletAccount (\mk -> mk wid idx)
+  where
+    wid = w ^. typed @(ApiT WalletId)
+
+listWalletAccountAddresses
+    :: forall w
+     . HasType (ApiT WalletId) w
+    => w
+    -> ApiAccountIndex
+    -> (Method, Text)
+listWalletAccountAddresses w idx =
+    endpoint @(Api.ListWalletAccountAddresses Net) (\mk -> mk wid idx Nothing)
+  where
+    wid = w ^. typed @(ApiT WalletId)
+
+createWalletAccountTransaction
+    :: forall w
+     . HasType (ApiT WalletId) w
+    => w
+    -> ApiAccountIndex
+    -> (Method, Text)
+createWalletAccountTransaction w idx =
+    endpoint @(Api.CreateWalletAccountTransaction Net) (\mk -> mk wid idx)
+  where
+    wid = w ^. typed @(ApiT WalletId)
+
+listWalletAccountTransactions
+    :: forall w
+     . HasType (ApiT WalletId) w
+    => w
+    -> ApiAccountIndex
+    -> (Method, Text)
+listWalletAccountTransactions w idx =
+    endpoint @(Api.ListWalletAccountTransactions Net)
+        (\mk -> mk wid idx Nothing Nothing Nothing Nothing Nothing Nothing
+            (toSimpleMetadataFlag TxMetadataDetailedSchema))
+  where
+    wid = w ^. typed @(ApiT WalletId)
+
+putWalletAccountMode
+    :: forall w
+     . HasType (ApiT WalletId) w
+    => w
+    -> ApiAccountIndex
+    -> (Method, Text)
+putWalletAccountMode w idx =
+    endpoint @Api.PutWalletAccountMode (\mk -> mk wid idx)
+  where
+    wid = w ^. typed @(ApiT WalletId)
+
+postWalletAccountConsolidate
+    :: forall w
+     . HasType (ApiT WalletId) w
+    => w
+    -> ApiAccountIndex
+    -> (Method, Text)
+postWalletAccountConsolidate w idx =
+    endpoint @(Api.PostWalletAccountConsolidate Net) (\mk -> mk wid idx)
   where
     wid = w ^. typed @(ApiT WalletId)
 

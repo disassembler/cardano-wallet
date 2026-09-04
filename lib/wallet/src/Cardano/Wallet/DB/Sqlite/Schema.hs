@@ -137,6 +137,7 @@ PrivateKey                             sql=private_key
 TxMeta
     txMetaTxId              TxId                sql=tx_id
     txMetaWalletId          W.WalletId          sql=wallet_id
+    txMetaAccountIndex      Word32              sql=account_index
     txMetaStatus            W.TxStatus          sql=status
     txMetaDirection         W.Direction         sql=direction
     txMetaSlot              SlotNo              sql=slot
@@ -147,7 +148,7 @@ TxMeta
     txMetaFee               Word64 Maybe        sql=fee
     txMetaScriptValidity    Bool Maybe          sql=script_validity
 
-    Primary txMetaTxId txMetaWalletId
+    Primary txMetaTxId txMetaWalletId txMetaAccountIndex
     Foreign Wallet OnDeleteCascade fk_wallet_tx_meta txMetaWalletId
     deriving Show Generic Eq
 
@@ -358,8 +359,11 @@ UTxOToken                               sql=utxo_token
 
 -- Sequential scheme address discovery state
 -- which does not belong to a particular checkpoint.
+-- Each row represents one hardened account; account_index = 0 is the
+-- default account (backward-compatible with pre-multi-account databases).
 SeqState
     seqStateWalletId          W.WalletId           sql=wallet_id
+    seqStateAccountIndex      Word32               sql=account_index
     seqStateExternalGap       W.AddressPoolGap     sql=external_gap
     seqStateInternalGap       W.AddressPoolGap     sql=internal_gap
     seqStateAccountXPub       B8.ByteString        sql=account_xpub
@@ -368,7 +372,7 @@ SeqState
     seqStateDerivationPrefix  W.DerivationPrefix   sql=derivation_prefix
     seqStateChangeAddrMode    W.ChangeAddressMode  sql=change_addr_mode
 
-    Primary seqStateWalletId
+    Primary seqStateWalletId seqStateAccountIndex
     Foreign Wallet OnDeleteCascade seq_state seqStateWalletId
     deriving Show Generic
 
@@ -376,6 +380,7 @@ SeqState
 -- when they were discovered.
 SeqStateAddress
     seqStateAddressWalletId         W.WalletId         sql=wallet_id
+    seqStateAddressAccountIndex     Word32             sql=account_index
     seqStateAddressSlot             SlotNo             sql=slot
     seqStateAddressAddress          W.Address          sql=address
     seqStateAddressIndex            Word32             sql=address_ix
@@ -384,6 +389,7 @@ SeqStateAddress
 
     Primary
         seqStateAddressWalletId
+        seqStateAddressAccountIndex
         seqStateAddressSlot
         seqStateAddressAddress
         seqStateAddressIndex
@@ -394,9 +400,10 @@ SeqStateAddress
 -- Sequential address discovery scheme -- pending change indexes
 SeqStatePendingIx                            sql=seq_state_pending
     seqStatePendingWalletId     W.WalletId   sql=wallet_id
+    seqStatePendingAccountIndex Word32       sql=account_index
     seqStatePendingIxIndex      Word32       sql=pending_ix
 
-    Primary seqStatePendingWalletId seqStatePendingIxIndex
+    Primary seqStatePendingWalletId seqStatePendingAccountIndex seqStatePendingIxIndex
     Foreign Wallet OnDeleteCascade seq_state_address_pending seqStatePendingWalletId
     deriving Show Generic
 

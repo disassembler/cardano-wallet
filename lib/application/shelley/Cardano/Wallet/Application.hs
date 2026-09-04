@@ -42,6 +42,7 @@ import Cardano.Wallet.Address.Derivation.Shelley
     )
 import Cardano.Wallet.Address.Discovery
     ( IsOurs
+    , KnownAddresses
     )
 import Cardano.Wallet.Address.Discovery.Random
     ( RndState
@@ -572,6 +573,7 @@ serveWallet
             :: forall s k
              . ( IsOurs s Address
                , IsOurs s RewardAccount
+               , KnownAddresses s
                , MaybeLight s
                , PersistAddressBook s
                , WalletFlavor s

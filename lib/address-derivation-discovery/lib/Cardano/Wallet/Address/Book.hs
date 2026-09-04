@@ -85,6 +85,15 @@ class (Eq (Prologue s), Eq (Discoveries s)) => AddressBookIso s where
     -- and its two components.
     addressIso :: Iso' s (Prologue s, Discoveries s)
 
+    -- | Merge user-configurable settings from the stored prologue into a
+    -- newly computed prologue. Called during block application so that
+    -- user-set fields (e.g. 'changeAddressMode') are not overwritten by
+    -- stale values from checkpoints computed before the user's change.
+    --
+    -- Default: return the new prologue unchanged.
+    mergeUserSettings :: Prologue s -> Prologue s -> Prologue s
+    mergeUserSettings _ new = new
+
 getPrologue :: AddressBookIso s => s -> Prologue s
 getPrologue = withIso addressIso $ \from _ -> fst . from
 
@@ -126,6 +135,11 @@ instance
                     d
                     e
                     f
+
+    mergeUserSettings
+        (SeqPrologue (Seq.SeqState _ _ _ _ _ _ _ mode))
+        (SeqPrologue (Seq.SeqState int ext a b c d e _)) =
+        SeqPrologue (Seq.SeqState int ext a b c d e mode)
 
 -- | Address data from sequential address pool.
 -- The phantom type parameter @c@ prevents mixing up

@@ -112,7 +112,7 @@ genDeltaTxWallets wid (_, metas) = do
                     )
                 ]
     frequency
-        $ (10, ExpandTxWalletsHistory wid . getNonEmpty <$> arbitrary)
+        $ (10, ExpandTxWalletsHistory wid 0 . getNonEmpty <$> arbitrary)
             : metaGens
 
 chooseFromMap :: Map.Map k a -> Gen a

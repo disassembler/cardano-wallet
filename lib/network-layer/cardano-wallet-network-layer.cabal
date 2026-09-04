@@ -43,6 +43,7 @@ library
   hs-source-dirs:  src
   exposed-modules:
     Cardano.Wallet.Network
+    Cardano.Wallet.Network.Broadcasting
     Cardano.Wallet.Network.Checkpoints.Policy
     Cardano.Wallet.Network.Config
     Cardano.Wallet.Network.Implementation
@@ -112,6 +113,7 @@ library
     , retry
     , safe
     , singletons
+    , stm
     , streaming
     , text
     , text-class
@@ -139,9 +141,11 @@ test-suite unit
     , QuickCheck
     , text
     , transformers
+    , unliftio
 
   build-tool-depends: hspec-discover:hspec-discover
   main-is:            Main.hs
   other-modules:
+    Cardano.Wallet.Network.BroadcastingSpec
     Cardano.Wallet.Network.Checkpoints.PolicySpec
     Cardano.Wallet.Network.LightSpec

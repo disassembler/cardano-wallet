@@ -113,6 +113,7 @@ import Cardano.Wallet.DB.Sqlite.Migration.Old
 import Cardano.Wallet.DB.Sqlite.Schema
     ( CBOR (..)
     , EntityField (..)
+    , SeqState (..)
     , TxMeta (..)
     , Wallet (..)
     , migrateAll
@@ -222,6 +223,9 @@ import Data.DBVar
     )
 import Data.Generics.Internal.VL.Lens
     ( (^.)
+    )
+import Control.Applicative
+    ( (<|>)
     )
 import Data.Maybe
     ( catMaybes
@@ -700,7 +704,7 @@ bootDBLayerFromSqliteContext wF ti wid params SqliteContext{runQuery} = do
                 atomically_ $ mkDBLayer <$> initDBVar store wallet
             atomically
                 $ updateS transactionsStore Nothing
-                $ ExpandTxWalletsHistory wid
+                $ ExpandTxWalletsHistory wid 0
                 $ dBLayerParamsHistory params
             pure dblayer
   where
@@ -770,12 +774,22 @@ mkDBLayerCollection ti wid atomically_ walletState =
         , rollbackTo_
         , atomically_
         , transactionsStore_
+        , listSeqAccounts_
+        , readSeqStateForAccount_
         }
   where
     transactionsQS = newQueryStoreTxWalletsHistory
 
     transactionsStore_ = transactionsQS
     getSchemaVersion_ = getSchemaVersion'
+
+    listSeqAccounts_ :: SqlPersistT IO [Word32]
+    listSeqAccounts_ =
+        fmap (seqStateAccountIndex . entityVal)
+            <$> selectList [SeqStateWalletId ==. wid] [Asc SeqStateAccountIndex]
+
+    readSeqStateForAccount_ :: Word32 -> SqlPersistT IO (Maybe s)
+    readSeqStateForAccount_ = loadExtraAccountState wid
 
     readCheckpoint
         :: SqlPersistT IO (W.Wallet s)
@@ -802,7 +816,17 @@ mkDBLayerCollection ti wid atomically_ walletState =
             Delta.onDBVar walletState
                 $ Delta.updateWithResult
                 $ \wal ->
-                    case findNearestPoint wal requestedPoint of
+                    let checkpointMap = wal ^. #checkpoints . #checkpoints
+                        -- When a real block at slot 0 replaces the genesis
+                        -- checkpoint in the DB, Origin is absent after restart.
+                        -- Fall back to the oldest available checkpoint so a
+                        -- node-requested rollback to genesis doesn't crash.
+                        mNearestPoint =
+                            findNearestPoint wal requestedPoint
+                                <|> case requestedPoint of
+                                    Origin -> fst <$> Map.lookupMin checkpointMap
+                                    _ -> Nothing
+                    in case mNearestPoint of
                         Nothing -> throw $ ErrNoOlderCheckpoint wid requestedPoint
                         Just nearestPoint ->
                             let nearestSlotNo = case nearestPoint of
@@ -818,7 +842,7 @@ mkDBLayerCollection ti wid atomically_ walletState =
                                     ]
                                 , case Map.lookup
                                     nearestPoint
-                                    (wal ^. #checkpoints . #checkpoints) of
+                                    checkpointMap of
                                     Nothing ->
                                         error
                                             "rollbackTo_: \
@@ -839,11 +863,11 @@ mkDBLayerCollection ti wid atomically_ walletState =
 
     dbTxHistory =
         DBTxHistory
-            { putTxHistory_ =
+            { putTxHistory_ = \acctIx ->
                 updateS transactionsQS Nothing
-                    . ExpandTxWalletsHistory wid
-            , readTxHistory_ = \range tip mlimit order -> do
-                txs <- queryS transactionsQS $ SomeMetas range mlimit order
+                    . ExpandTxWalletsHistory wid acctIx
+            , readTxHistory_ = \range tip mlimit order mAcctIx -> do
+                txs <- queryS transactionsQS $ SomeMetas range mlimit order mAcctIx
                 forM txs
                     $ selectTransactionInfo ti tip lookupTx lookupTxOut
             , getTx_ = \txid tip -> do

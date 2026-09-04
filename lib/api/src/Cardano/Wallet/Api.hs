@@ -27,10 +27,22 @@ module Cardano.Wallet.Api
     , GetWallet
     , ListWallets
     , PostWallet
+    , PostWalletRescan
     , PutWallet
     , PutWalletPassphrase
     , GetUTxOsStatistics
     , GetWalletUtxoSnapshot
+    , WalletAccounts
+    , PostWalletAccount
+    , ListWalletAccounts
+    , GetWalletAccount
+    , DeleteWalletAccount
+    , ListWalletAccountAddresses
+    , GetWalletAccountUTxOsStatistics
+    , CreateWalletAccountTransaction
+    , ListWalletAccountTransactions
+    , PutWalletAccountMode
+    , PostWalletAccountConsolidate
     , WalletKeys
     , GetWalletKey
     , SignMetadata
@@ -174,6 +186,8 @@ import Cardano.Wallet.Address.Derivation
     )
 import Cardano.Wallet.Api.Types
     ( AnyAddress
+    , ApiAccount
+    , ApiAccountIndex
     , ApiAccountKey
     , ApiAccountKeyShared
     , ApiAddressData
@@ -185,6 +199,7 @@ import Cardano.Wallet.Api.Types
     , ApiBalanceTransactionPostDataT
     , ApiByronWallet
     , ApiCoinSelectionT
+    , ApiConsolidateRequest
     , ApiConstructTransactionDataT
     , ApiConstructTransactionT
     , ApiDRepInfo
@@ -202,6 +217,7 @@ import Cardano.Wallet.Api.Types
     , ApiPolicyId
     , ApiPolicyKey
     , ApiPoolSpecifier
+    , ApiPostAccount
     , ApiPostAccountKeyData
     , ApiPostAccountKeyDataWithPurpose
     , ApiPostPolicyIdData
@@ -210,6 +226,7 @@ import Cardano.Wallet.Api.Types
     , ApiPutAddressesDataT
     , ApiSelectCoinsDataT
     , ApiSerialisedTransaction
+    , ApiSetAccountMode
     , ApiSharedWallet
     , ApiSharedWalletPatchData
     , ApiSharedWalletPostData
@@ -257,6 +274,9 @@ import Cardano.Wallet.Flavor
     )
 import Cardano.Wallet.Network
     ( NetworkLayer
+    )
+import Cardano.Wallet.Network.Broadcasting
+    ( ChainBroadcaster
     )
 import Cardano.Wallet.Pools
     ( StakePool
@@ -320,12 +340,22 @@ import Data.Kind
 import Data.List.NonEmpty
     ( NonEmpty
     )
+import Data.Map.Strict
+    ( Map
+    )
+import UnliftIO.Async
+    ( Async
+    )
+import UnliftIO.STM
+    ( TVar
+    )
 import GHC.Generics
     ( Generic
     )
 import Servant.API
     ( Capture
     , JSON
+    , NoContent (..)
     , OctetStream
     , QueryFlag
     , QueryParam
@@ -357,6 +387,7 @@ type ApiV2 n = "v2" :> Api n
 type Api n =
     Wallets
         :<|> WalletKeys
+        :<|> WalletAccounts n
         :<|> Assets
         :<|> Addresses n
         :<|> CoinSelections n
@@ -391,6 +422,7 @@ type Wallets =
         :<|> GetWallet
         :<|> ListWallets
         :<|> PostWallet
+        :<|> PostWalletRescan
         :<|> PutWallet
         :<|> PutWalletPassphrase
         :<|> GetWalletUtxoSnapshot
@@ -418,6 +450,15 @@ type PostWallet =
     "wallets"
         :> ReqBody '[JSON] (PostData ApiWallet)
         :> PostCreated '[JSON] ApiWallet
+
+-- | Trigger a full rescan of a Shelley wallet from genesis.
+-- The wallet's chain state is rolled back to genesis and a fresh
+-- catch-up thread is launched.
+type PostWalletRescan =
+    "wallets"
+        :> Capture "walletId" (ApiT WalletId)
+        :> "rescan"
+        :> PostAccepted '[JSON] NoContent
 
 -- | https://cardano-foundation.github.io/cardano-wallet/api/#operation/putWallet
 type PutWallet =
@@ -448,6 +489,110 @@ type GetUTxOsStatistics =
         :> "statistics"
         :> "utxos"
         :> Get '[JSON] ApiUtxoStatistics
+
+{-------------------------------------------------------------------------------
+                                  Wallet Accounts
+-------------------------------------------------------------------------------}
+
+type WalletAccounts n =
+    PostWalletAccount
+        :<|> ListWalletAccounts
+        :<|> GetWalletAccount
+        :<|> DeleteWalletAccount
+        :<|> ListWalletAccountAddresses n
+        :<|> GetWalletAccountUTxOsStatistics
+        :<|> CreateWalletAccountTransaction n
+        :<|> ListWalletAccountTransactions n
+        :<|> PutWalletAccountMode
+        :<|> PostWalletAccountConsolidate n
+
+type PostWalletAccount =
+    "wallets"
+        :> Capture "walletId" (ApiT WalletId)
+        :> "accounts"
+        :> ReqBody '[JSON] ApiPostAccount
+        :> PostCreated '[JSON] ApiAccount
+
+type ListWalletAccounts =
+    "wallets"
+        :> Capture "walletId" (ApiT WalletId)
+        :> "accounts"
+        :> Get '[JSON] [ApiAccount]
+
+type GetWalletAccount =
+    "wallets"
+        :> Capture "walletId" (ApiT WalletId)
+        :> "accounts"
+        :> Capture "accountIndex" ApiAccountIndex
+        :> Get '[JSON] ApiAccount
+
+type DeleteWalletAccount =
+    "wallets"
+        :> Capture "walletId" (ApiT WalletId)
+        :> "accounts"
+        :> Capture "accountIndex" ApiAccountIndex
+        :> DeleteNoContent
+
+type ListWalletAccountAddresses n =
+    "wallets"
+        :> Capture "walletId" (ApiT WalletId)
+        :> "accounts"
+        :> Capture "accountIndex" ApiAccountIndex
+        :> "addresses"
+        :> QueryParam "state" (ApiT AddressState)
+        :> Get '[JSON] [ApiAddressT n]
+
+type GetWalletAccountUTxOsStatistics =
+    "wallets"
+        :> Capture "walletId" (ApiT WalletId)
+        :> "accounts"
+        :> Capture "accountIndex" ApiAccountIndex
+        :> "statistics"
+        :> "utxos"
+        :> Get '[JSON] ApiUtxoStatistics
+
+type CreateWalletAccountTransaction n =
+    "wallets"
+        :> Capture "walletId" (ApiT WalletId)
+        :> "accounts"
+        :> Capture "accountIndex" ApiAccountIndex
+        :> "transactions"
+        :> ReqBody '[JSON] (PostTransactionOldDataT n)
+        :> PostAccepted '[JSON] (ApiTransactionT n)
+
+type ListWalletAccountTransactions n =
+    "wallets"
+        :> Capture "walletId" (ApiT WalletId)
+        :> "accounts"
+        :> Capture "accountIndex" ApiAccountIndex
+        :> "transactions"
+        :> QueryParam "minWithdrawal" MinWithdrawal
+        :> QueryParam "start" Iso8601Time
+        :> QueryParam "end" Iso8601Time
+        :> QueryParam "order" (ApiT SortOrder)
+        :> QueryParam "max_count" ApiLimit
+        :> QueryParam "address" (ApiAddressIdT n)
+        :> QueryFlag "simple-metadata"
+        :> Get '[JSON] [ApiTransactionT n]
+
+type PutWalletAccountMode =
+    "wallets"
+        :> Capture "walletId" (ApiT WalletId)
+        :> "accounts"
+        :> Capture "accountIndex" ApiAccountIndex
+        :> "mode"
+        :> ReqBody '[JSON] ApiSetAccountMode
+        :> Put '[JSON] ApiAccount
+
+type PostWalletAccountConsolidate n =
+    "wallets"
+        :> Capture "walletId" (ApiT WalletId)
+        :> "accounts"
+        :> Capture "accountIndex" ApiAccountIndex
+        :> "utxo"
+        :> "consolidate"
+        :> ReqBody '[JSON] ApiConsolidateRequest
+        :> PostAccepted '[JSON] [ApiTransactionT n]
 
 {-------------------------------------------------------------------------------
                                   Wallet Keys
@@ -1398,6 +1543,11 @@ data ApiLayer s
     , _workerRegistry :: WorkerRegistry WalletId (DBLayer IO s)
     , concierge :: Concierge IO WalletLock
     , _tokenMetadataClient :: TokenMetadataClient IO
+    , _chainBroadcaster :: ChainBroadcaster WalletId
+    -- ^ Shared master chain-sync broadcaster; all wallets subscribe here.
+    , _catchUpRegistry :: TVar (Map WalletId (Async ()))
+    -- ^ Active per-wallet catch-up threads, keyed for cancellation on
+    -- wallet delete or rescan.
     }
     deriving (Generic)
 
@@ -1411,7 +1561,7 @@ instance HasWorkerCtx (DBLayer IO s) (ApiLayer s) where
     type WorkerCtx (ApiLayer s) = WalletLayer IO s
     type WorkerMsg (ApiLayer s) = WalletWorkerLog
     type WorkerKey (ApiLayer s) = WalletId
-    hoistResource db transform (ApiLayer _ tr gp nw tl _ _ _ _) =
+    hoistResource db transform (ApiLayer _ tr gp nw tl _ _ _ _ _ _) =
         WalletLayer (contramap transform tr) gp nw tl db
 
 {-------------------------------------------------------------------------------

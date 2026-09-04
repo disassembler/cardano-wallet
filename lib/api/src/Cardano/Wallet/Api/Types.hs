@@ -151,6 +151,14 @@ module Cardano.Wallet.Api.Types
     , ApiValidityInterval (..)
     , ApiVerificationKeyShared (..)
     , ApiVerificationKeyShelley (..)
+    , AccountMode (..)
+    , ApiAccount (..)
+    , ApiAccountIndex (..)
+    , apiAccountIndexToHardened
+    , hardenedToApiAccountIndex
+    , ApiConsolidateRequest (..)
+    , ApiPostAccount (..)
+    , ApiSetAccountMode (..)
     , ApiWallet (..)
     , ApiWalletAssetsBalance (..)
     , ApiWalletBalance (..)
@@ -298,6 +306,7 @@ import Cardano.Pool.Types
 import Cardano.Wallet.Address.Derivation
     ( Depth (..)
     , DerivationIndex (..)
+    , DerivationType (..)
     , Index (..)
     )
 import Cardano.Wallet.Address.Discovery.Random
@@ -565,7 +574,8 @@ import Data.Map.Strict
     ( Map
     )
 import Data.Maybe
-    ( fromMaybe
+    ( catMaybes
+    , fromMaybe
     )
 import Data.Percentage
     ( Percentage
@@ -683,6 +693,10 @@ import qualified Data.ByteString.Char8 as B8
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.List as L
 import qualified Data.Map as Map
+import Text.Read
+    ( readMaybe
+    )
+
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import qualified Data.Text.Read as T
@@ -992,6 +1006,101 @@ data ApiWallet = ApiWallet
     }
     deriving (Eq, Generic, Show)
     deriving (FromJSON, ToJSON) via DefaultRecord ApiWallet
+    deriving anyclass (NFData)
+
+data AccountMode
+    = AccountModeHD
+    | AccountModeSingleAddress
+    deriving (Eq, Generic, Show)
+    deriving (FromJSON, ToJSON) via DefaultSum AccountMode
+    deriving anyclass (NFData)
+
+-- | Account index as a plain non-negative integer in the API.
+-- Account N corresponds to hardened derivation path m/1852'/1815'/N'.
+-- The hardened bit is implicit — callers use 0, 1, 2, not 0H, 1H, 2H.
+newtype ApiAccountIndex = ApiAccountIndex {getApiAccountIndex :: Word32}
+    deriving (Eq, Ord, Show, Generic)
+    deriving anyclass (NFData)
+
+instance FromJSON ApiAccountIndex where
+    parseJSON v = ApiAccountIndex <$> parseJSON v
+
+instance ToJSON ApiAccountIndex where
+    toJSON (ApiAccountIndex w) = toJSON w
+
+instance FromHttpApiData ApiAccountIndex where
+    parseUrlPiece t = case readMaybe (T.unpack t) of
+        Just w  -> Right (ApiAccountIndex w)
+        Nothing -> Left "account index must be a non-negative integer"
+
+instance ToHttpApiData ApiAccountIndex where
+    toUrlPiece (ApiAccountIndex w) = T.pack (show w)
+
+-- | Convert plain API account index to hardened index.
+apiAccountIndexToHardened :: ApiAccountIndex -> Index 'Hardened 'AccountK
+apiAccountIndexToHardened (ApiAccountIndex w) =
+    Index (w + getIndex (minBound :: Index 'Hardened 'AccountK))
+
+-- | Convert hardened index to plain API account index.
+hardenedToApiAccountIndex :: Index 'Hardened 'AccountK -> ApiAccountIndex
+hardenedToApiAccountIndex ix =
+    ApiAccountIndex (getIndex ix - getIndex (minBound :: Index 'Hardened 'AccountK))
+
+data ApiAccount = ApiAccount
+    { accountIndex :: !ApiAccountIndex
+    , balance :: !ApiWalletBalance
+    , assets :: !ApiWalletAssetsBalance
+    , delegation :: !ApiWalletDelegation
+    , rewardAccountKey :: !(Maybe Text)
+    , addressPoolGap :: !(ApiT AddressPoolGap)
+    , addressDerivationMode :: !AccountMode
+    , state :: !(ApiT SyncProgress)
+    , tip :: !ApiBlockReference
+    }
+    deriving (Eq, Generic, Show)
+    deriving (FromJSON, ToJSON) via DefaultRecord ApiAccount
+    deriving anyclass (NFData)
+
+data ApiPostAccount = ApiPostAccount
+    { accountIndex :: ApiAccountIndex
+    , passphrase :: Maybe (ApiT (Passphrase "user"))
+    , accountPublicKey :: Maybe ApiAccountPublicKey
+    }
+    deriving (Eq, Generic, Show)
+    deriving anyclass (NFData)
+
+instance FromJSON ApiPostAccount where
+    parseJSON = withObject "Cardano.Wallet.Api.Types.ApiPostAccount(ApiPostAccount)" $ \o -> do
+        accountIndex <- o .: "account_index"
+        passphrase <- o .:? "passphrase"
+        accountPublicKey <- o .:? "account_public_key"
+        case (passphrase, accountPublicKey) of
+            (Nothing, Nothing) ->
+                fail "must provide either 'passphrase' or 'account_public_key'"
+            (Just _, Just _) ->
+                fail "cannot provide both 'passphrase' and 'account_public_key'"
+            _ -> pure ApiPostAccount{accountIndex, passphrase, accountPublicKey}
+
+instance ToJSON ApiPostAccount where
+    toJSON ApiPostAccount{accountIndex, passphrase, accountPublicKey} =
+        object $ catMaybes
+            [ Just ("account_index" .= accountIndex)
+            , ("passphrase" .=) <$> passphrase
+            , ("account_public_key" .=) <$> accountPublicKey
+            ]
+
+newtype ApiSetAccountMode = ApiSetAccountMode
+    { mode :: AccountMode
+    }
+    deriving (Eq, Generic, Show)
+    deriving (FromJSON, ToJSON) via DefaultRecord ApiSetAccountMode
+    deriving anyclass (NFData)
+
+newtype ApiConsolidateRequest = ApiConsolidateRequest
+    { passphrase :: ApiT (Passphrase "user")
+    }
+    deriving (Eq, Generic, Show)
+    deriving (FromJSON, ToJSON) via DefaultRecord ApiConsolidateRequest
     deriving anyclass (NFData)
 
 data ApiWalletBalance = ApiWalletBalance

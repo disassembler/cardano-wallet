@@ -752,7 +752,7 @@ benchPutTxHistory
     -> IO ()
 benchPutTxHistory numTxs numInputs numOutputs numAssets range DBLayer{..} = do
     let txs = mkTxHistory numTxs numInputs numOutputs numAssets range
-    atomically $ putTxHistory txs
+    atomically $ putTxHistory 0 txs
 
 benchReadTxHistory
     :: SortOrder
@@ -866,7 +866,7 @@ txHistoryFixture bSize nAssets range =
     (nInps, nOuts) = (20, 20)
     txs = mkTxHistory bSize nInps nOuts nAssets range
 
-    initialize DBLayer{..} = atomically $ putTxHistory txs
+    initialize DBLayer{..} = atomically $ putTxHistory 0 txs
 
 walletFixture :: WalletFixture StateBench
 walletFixture =

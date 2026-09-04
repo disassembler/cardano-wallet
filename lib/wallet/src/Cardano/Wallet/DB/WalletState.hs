@@ -257,6 +257,12 @@ type DeltaWalletState s = [DeltaWalletState1 s]
 data DeltaWalletState1 s
     = -- | Replace the prologue of the address discovery state
       ReplacePrologue (Prologue s)
+    | -- | Insert (or replace) the prologue for an extra account index.
+      -- No-op on the in-memory wallet state; side-effects in the SQL layer.
+      InsertExtraPrologue Word32 (Prologue s)
+    | -- | Delete all persisted state for an extra account index.
+      -- No-op on the in-memory wallet state; side-effects in the SQL layer.
+      DeleteExtraPrologue Word32
     | -- | Update the wallet checkpoints.
       UpdateCheckpoints (CPS.DeltasCheckpoints (WalletCheckpoint s))
     | UpdateSubmissions DeltaTxSubmissions
@@ -268,6 +274,8 @@ data DeltaWalletState1 s
 instance Delta (DeltaWalletState1 s) where
     type Base (DeltaWalletState1 s) = WalletState s
     apply (ReplacePrologue p) = over #prologue $ const p
+    apply (InsertExtraPrologue _ _) = id
+    apply (DeleteExtraPrologue _) = id
     apply (UpdateCheckpoints d) = over #checkpoints $ apply d
     apply (UpdateSubmissions d) = over #submissions $ apply d
     apply (UpdateInfo d) = over #info $ apply d
@@ -277,6 +285,10 @@ instance Delta (DeltaWalletState1 s) where
 
 instance Buildable (DeltaWalletState1 s) where
     build (ReplacePrologue _) = "ReplacePrologue …"
+    build (InsertExtraPrologue ix _) =
+        "InsertExtraPrologue " <> build (show ix) <> " …"
+    build (DeleteExtraPrologue ix) =
+        "DeleteExtraPrologue " <> build (show ix)
     build (UpdateCheckpoints d) = "UpdateCheckpoints (" <> build d <> ")"
     build (UpdateSubmissions d) = "UpdateSubmissions (" <> build d <> ")"
     build (UpdateInfo d) = "UpdateInfo (" <> build d <> ")"

@@ -927,9 +927,11 @@ changeAddressModeFromText :: Text -> Either Text ChangeAddressMode
 changeAddressModeFromText = \case
     "single" -> Right SingleChangeAddress
     "increasing" -> Right IncreasingChangeAddresses
+    "single_external" -> Right SingleExternalAddress
     other -> Left $ "Invalid ChangeAddressMode: " <> other
 
 textFromChangeAddressMode :: ChangeAddressMode -> Text
 textFromChangeAddressMode = \case
     SingleChangeAddress -> "single"
     IncreasingChangeAddresses -> "increasing"
+    SingleExternalAddress -> "single_external"

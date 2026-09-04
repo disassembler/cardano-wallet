@@ -88,6 +88,7 @@ import Cardano.Wallet.Api
     , ShelleyMigrations
     , ShelleyTransactions
     , StakePools
+    , WalletAccounts
     , WalletKeys
     , Wallets
     )
@@ -133,8 +134,18 @@ import Cardano.Wallet.Api.Http.Shelley.Server
     , mkSharedWallet
     , mkShelleyWallet
     , patchSharedWallet
+    , deleteWalletAccountH
+    , getWalletAccount
+    , getWalletAccountUtxoStatistics
+    , listWalletAccountAddressesH
+    , listWalletAccountTransactionsH
+    , listWalletAccountsH
+    , postWalletAccountConsolidateH
+    , createWalletAccountTransactionH
+    , putWalletAccountModeH
     , postAccountPublicKey
     , postAccountWallet
+    , postWalletAccount
     , postExternalTransaction
     , postIcarusWallet
     , postLedgerWallet
@@ -148,6 +159,7 @@ import Cardano.Wallet.Api.Http.Shelley.Server
     , postTransactionOld
     , postTrezorWallet
     , postWallet
+    , postWalletRescan
     , putByronWalletPassphrase
     , putRandomAddress
     , putRandomAddresses
@@ -294,6 +306,7 @@ server
 server byron icarus shelley multisig spl drepLayer ntp blockchainSource =
     wallets
         :<|> walletKeys
+        :<|> walletAccounts
         :<|> assets
         :<|> addresses
         :<|> coinSelections
@@ -317,12 +330,26 @@ server byron icarus shelley multisig spl drepLayer ntp blockchainSource =
         :<|> sharedTransactions multisig
         :<|> blocks
   where
+    walletAccounts :: Server (WalletAccounts n)
+    walletAccounts =
+        postWalletAccount shelley
+            :<|> listWalletAccountsH shelley
+            :<|> getWalletAccount shelley
+            :<|> deleteWalletAccountH shelley
+            :<|> listWalletAccountAddressesH shelley (normalizeDelegationAddress @_ @ShelleyKey @n)
+            :<|> getWalletAccountUtxoStatistics shelley
+            :<|> createWalletAccountTransactionH shelley (delegationAddressS @n)
+            :<|> listWalletAccountTransactionsH shelley
+            :<|> putWalletAccountModeH shelley
+            :<|> postWalletAccountConsolidateH shelley
+
     wallets :: Server Wallets
     wallets =
         deleteWallet shelley
             :<|> (fmap fst . getWallet shelley mkShelleyWallet)
             :<|> (fmap fst <$> listWallets shelley mkShelleyWallet)
             :<|> postWallet shelley Shelley.generateKeyFromSeed ShelleyKey
+            :<|> postWalletRescan shelley
             :<|> putWallet shelley mkShelleyWallet
             :<|> putWalletPassphrase
                 shelley

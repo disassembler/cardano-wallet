@@ -222,13 +222,14 @@ readTxHistory_ DBLayer{..} =
                 Nothing
                 Nothing
                 Nothing
+                Nothing
             )
 
 putTxHistory_
     :: DBLayer m s
     -> GenTxHistory
     -> m ()
-putTxHistory_ DBLayer{..} = atomically . putTxHistory . unGenTxHistory
+putTxHistory_ DBLayer{..} = atomically . putTxHistory 0 . unGenTxHistory
 
 {-------------------------------------------------------------------------------
                                        Utils
@@ -302,7 +303,7 @@ prop_getTxAfterPutValidTxId
     -> Property
 prop_getTxAfterPutValidTxId test txGen = test $ \DBLayer{..} _ -> do
     let txs = unGenTxHistory txGen
-    run $ atomically $ putTxHistory txs
+    run $ atomically $ putTxHistory 0 txs
     forM_ txs $ \(Tx{txId}, txMeta) -> do
         (Just (TransactionInfo{txInfoId, txInfoMeta})) <-
             run $ atomically $ getTx txId
@@ -329,7 +330,7 @@ prop_getTxAfterPutInvalidTxId
     -> Property
 prop_getTxAfterPutInvalidTxId test txGen txId' = test $ \DBLayer{..} _ -> do
     let txs = unGenTxHistory txGen
-    run $ atomically $ putTxHistory txs
+    run $ atomically $ putTxHistory 0 txs
     res <- run $ atomically $ getTx txId'
     assertWith
         "Irrespective of Inserted, Read is Nothing for invalid tx id"
@@ -396,7 +397,7 @@ prop_rollbackTxHistory test (InitialCheckpoint cp0) (GenTxHistory txs0) =
             monitor $ label ("Forgotten tx after point: " <> show (L.length ixs))
             monitor $ cover 50 (not $ null ixs) "rolling back something"
             (point, txs) <- run $ do
-                atomically $ putTxHistory txs0
+                atomically $ putTxHistory 0 txs0
                 point <- atomically $ rollbackTo (At requestedPoint)
                 txs <-
                     atomically
@@ -405,6 +406,7 @@ prop_rollbackTxHistory test (InitialCheckpoint cp0) (GenTxHistory txs0) =
                                 Nothing
                                 Descending
                                 Range.everything
+                                Nothing
                                 Nothing
                                 Nothing
                                 Nothing

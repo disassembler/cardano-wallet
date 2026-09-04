@@ -83,7 +83,7 @@ spec = do
             $ property prop_RollbackDoNotTouchPast
 
 genExpand :: WalletId -> Gen [(W.Tx, W.TxMeta)] -> Gen TxMetaHistory
-genExpand wid g = mkTxMetaHistory wid <$> g
+genExpand wid g = mkTxMetaHistory wid 0 <$> g
 
 genRollback :: TxMetaHistory -> Gen DeltaTxMetaHistory
 genRollback (TxMetaHistory history) =

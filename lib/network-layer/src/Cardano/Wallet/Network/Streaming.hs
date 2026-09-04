@@ -3,8 +3,11 @@
 {-# LANGUAGE TypeOperators #-}
 
 module Cardano.Wallet.Network.Streaming
-    ( -- * ChainStream creation
-      ChainStream
+    ( -- * Message protocol
+      Message (..)
+
+      -- * ChainStream creation
+    , ChainStream
     , withStreamingFromBlockChain
     , NewBuffer
     , newTMVarBuffer

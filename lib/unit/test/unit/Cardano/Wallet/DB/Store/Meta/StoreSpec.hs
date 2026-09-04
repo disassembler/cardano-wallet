@@ -137,7 +137,7 @@ prop_QueryLaw =
             assertWith "GetSome"
                 <=< runQ
                 $ queryLaw mkQueryStoreTxMeta history
-                $ GetSome range limit order
+                $ GetSome range limit order Nothing
             slot <- pick $ genSlot history
             assertWith "GetAfterSlot"
                 <=< runQ

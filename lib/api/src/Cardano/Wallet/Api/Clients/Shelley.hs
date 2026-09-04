@@ -126,6 +126,8 @@ listWallets
     :: ClientM [ApiWallet]
 postWallet
     :: WalletOrAccountPostData -> ClientM ApiWallet
+postWalletRescan
+    :: ApiT WalletId -> ClientM NoContent
 putWallet
     :: ApiT WalletId -> ApiWalletPutDataExtended -> ClientM ApiWallet
 putWalletPassphrase
@@ -140,6 +142,7 @@ deleteWallet
     :<|> getWallet
     :<|> listWallets
     :<|> postWallet
+    :<|> postWalletRescan
     :<|> putWallet
     :<|> putWalletPassphrase
     :<|> getWalletUtxoSnapshot

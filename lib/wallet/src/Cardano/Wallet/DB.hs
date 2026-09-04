@@ -151,6 +151,9 @@ import Data.Store
 import Data.Traversable
     ( for
     )
+import Data.Word
+    ( Word32
+    )
 import GHC.Num
     ( Natural
     )
@@ -231,8 +234,8 @@ data DBLayer m s = forall stm. (MonadIO stm, MonadFail stm) => DBLayer
         :: stm [ChainPoint]
     -- ^ List all known checkpoint tips, ordered by slot ids from the oldest
     -- to the newest.
-    , putTxHistory :: [(Tx, TxMeta)] -> stm ()
-    -- ^ Augments the transaction history for a known wallet.
+    , putTxHistory :: Word32 -> [(Tx, TxMeta)] -> stm ()
+    -- ^ Augments the transaction history for a known wallet account.
     --
     -- If an entry for a particular transaction already exists it is not
     -- altered nor merged (just ignored).
@@ -243,6 +246,8 @@ data DBLayer m s = forall stm. (MonadIO stm, MonadFail stm) => DBLayer
         -> Maybe TxStatus
         -> Maybe Natural
         -> Maybe Address
+        -> Maybe Word32
+        -- ^ Optional account index filter; 'Nothing' returns all accounts.
         -> stm [TransactionInfo]
     -- ^ Fetch the current transaction history of a known wallet, ordered by
     -- descending slot number.
@@ -279,6 +284,15 @@ data DBLayer m s = forall stm. (MonadIO stm, MonadFail stm) => DBLayer
         :: stm Version
     -- ^ Get the version of the schema currently stored in the database.
     -- Only used for internal consistency checks.
+    , listSeqAccounts
+        :: stm [Word32]
+    -- ^ List all hardened account indices persisted for this wallet.
+    -- For a fresh wallet, returns @[0]@.  For a multi-account wallet,
+    -- returns @[0, 1, …, N]@ sorted ascending.
+    , readSeqStateForAccount
+        :: Word32 -> stm (Maybe s)
+    -- ^ Read the address-discovery state for an additional account index.
+    -- Returns 'Nothing' for non-sequential wallet types or unknown indices.
     , atomically
         :: forall a. stm a -> m a
     -- ^ Execute operations of the database in isolation and atomically.
@@ -357,6 +371,13 @@ data DBLayerCollection stm m s = DBLayerCollection
         :: forall a. stm a -> m a
     , transactionsStore_
         :: Store stm QueryTxWalletsHistory DeltaTxWalletsHistory
+    , listSeqAccounts_
+        :: stm [Word32]
+    -- ^ List all account indices persisted for this wallet.
+    , readSeqStateForAccount_
+        :: Word32 -> stm (Maybe s)
+    -- ^ Read the address-discovery state for an additional account.
+    -- Returns Nothing for non-sequential wallets or unknown account indices.
     }
 
 {- HLINT ignore mkDBLayerFromParts "Avoid lambda" -}
@@ -377,11 +398,11 @@ mkDBLayerFromParts ti wid_ DBLayerCollection{..} =
         , readCheckpoint = readCheckpoint'
         , listCheckpoints = listCheckpoints_ dbCheckpoints
         , putTxHistory = putTxHistory_ dbTxHistory
-        , readTransactions = \minWithdrawal order range status limit maddress ->
+        , readTransactions = \minWithdrawal order range status limit maddress mAcctIx ->
             readCurrentTip >>= \tip -> do
                 inLedgers <-
                     if status `elem` [Nothing, Just WTxMeta.InLedger]
-                        then readTxHistory_ dbTxHistory range tip limit order
+                        then readTxHistory_ dbTxHistory range tip limit order mAcctIx
                         else pure []
                 let isInSubmission = has (txStatus . _InSubmission)
                     isExpired = has (txStatus . _Expired)
@@ -434,6 +455,8 @@ mkDBLayerFromParts ti wid_ DBLayerCollection{..} =
         , readGenesisParameters = readGenesisParameters_ dbCheckpoints
         , rollbackTo = rollbackTo_
         , getSchemaVersion = getSchemaVersion_
+        , listSeqAccounts = listSeqAccounts_
+        , readSeqStateForAccount = readSeqStateForAccount_
         , atomically = atomically_
         }
   where
@@ -475,9 +498,10 @@ data DBCheckpoints stm s = DBCheckpoints
 -- | A database layer that stores the transaction history.
 data DBTxHistory stm = DBTxHistory
     { putTxHistory_
-        :: [(Tx, TxMeta)]
+        :: Word32
+        -> [(Tx, TxMeta)]
         -> stm ()
-    -- ^ Augments the transaction history for a known wallet.
+    -- ^ Augments the transaction history for a known wallet account.
     --
     -- If an entry for a particular transaction already exists it is not
     -- altered nor merged (just ignored).
@@ -489,6 +513,8 @@ data DBTxHistory stm = DBTxHistory
         -> BlockHeader
         -> Maybe Natural
         -> SortOrder
+        -> Maybe Word32
+        -- ^ Optional account index filter; 'Nothing' returns all accounts.
         -> stm [TransactionInfo]
     -- ^ Fetch the current transaction history of a known wallet, ordered by
     -- descending slot number.

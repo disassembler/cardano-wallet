@@ -38,9 +38,7 @@ import Cardano.Wallet.DB.Migration
     )
 import Cardano.Wallet.DB.Sqlite.Migration.New
     ( newMigrationInterface
-    )
-import Cardano.Wallet.DB.Store.Checkpoints.Migration
-    ( migratePrologue
+    , newStyleMigrations
     )
 import Cardano.Wallet.DB.Store.Checkpoints.Store
     ( PersistAddressBook (..)
@@ -63,7 +61,7 @@ import Prelude
 
 spec :: Spec
 spec =
-    describe "migratePrologue :: Migration _ 3 4" $ do
+    describe "newStyleMigrations :: Migration _ 2 6" $ do
         it "'migrate' db sequential table"
             $ testCanLoadAfterMigration
                 (Proxy :: Proxy (SeqState 'Mainnet ShelleyKey))
@@ -97,7 +95,7 @@ withCopiedAndMigrated file action =
         runMigrations
             (newMigrationInterface nullTracer)
             path
-            migratePrologue
+            newStyleMigrations
         Right a <-
             withSqliteContextFile
                 nullTracer

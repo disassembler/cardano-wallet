@@ -55,6 +55,7 @@ import Prelude hiding
     )
 
 import qualified Cardano.Wallet.DB.Sqlite.Migration.Old as Old
+import qualified Cardano.Wallet.DB.Sqlite.Migration.V6 as V6
 import qualified Cardano.Wallet.DB.Store.Delegations.Migrations.V3.Migration as V3
 import qualified Cardano.Wallet.DB.Store.Delegations.Migrations.V5.Migration as V5
 
@@ -62,9 +63,10 @@ import qualified Cardano.Wallet.DB.Store.Delegations.Migrations.V5.Migration as 
     Specific migrations
 ------------------------------------------------------------------------------}
 
-newStyleMigrations :: Migration (ReadDBHandle IO) 2 5
+newStyleMigrations :: Migration (ReadDBHandle IO) 2 6
 newStyleMigrations =
-    V5.migrateDelegations
+    V6.migrateAccounts
+        . V5.migrateDelegations
         . migratePrologue
         . V3.migrateDelegations
 

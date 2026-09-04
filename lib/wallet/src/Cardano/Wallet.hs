@@ -81,6 +81,9 @@ module Cardano.Wallet
     , readWallet
     , readPrivateKey
     , restoreWallet
+    , mkWalletBroadcastOps
+    , catchUpWallet
+    , rescanWallet
     , updateWallet
     , updateWalletPassphraseWithOldPassphrase
     , updateWalletPassphraseWithMnemonic
@@ -119,6 +122,19 @@ module Cardano.Wallet
     , getCurrentEpochSlotting
     , setChangeAddressMode
     , setChangeAddressModeShared
+    , setChangeAddressModeForAccount
+    , addWalletAccount
+    , addWalletAccountXPub
+    , listWalletAccounts
+    , deleteWalletAccount
+    , readAccountUTxO
+    , listAccountUtxoStatistics
+    , listAccountAddresses
+    , createAccountMigrationPlan
+    , AccountSummary (..)
+    , ErrAddAccount (..)
+    , ErrDeleteAccount (..)
+    , ErrGetAccount (..)
     , assertIsVoting
     , assertDifferentVoting
 
@@ -150,6 +166,7 @@ module Cardano.Wallet
     , selectionToUnsignedTx
     , readNodeTipStateForTxWrite
     , buildSignSubmitTransaction
+    , buildSignSubmitAccountTransaction
     , buildTransaction
     , buildAndSignTransaction
     , BuiltTx (..)
@@ -193,6 +210,7 @@ module Cardano.Wallet
       -- ** Transaction
     , forgetTx
     , listTransactions
+    , listTransactionsForAccount
     , listAssets
     , getTransaction
     , submitExternalTx
@@ -342,7 +360,7 @@ import Cardano.Slotting.Slot
     ( SlotNo (..)
     )
 import Cardano.Wallet.Address.Book
-    ( AddressBookIso
+    ( AddressBookIso (mergeUserSettings)
     , Prologue (..)
     , getDiscoveries
     , getPrologue
@@ -404,8 +422,11 @@ import Cardano.Wallet.Address.Discovery.Random
     )
 import Cardano.Wallet.Address.Discovery.Sequential
     ( SeqState (..)
+    , SupportsDiscovery
     , defaultAddressPoolGap
+    , mkSeqStateFromAccountXPub
     , purposeBIP44
+    , purposeCIP1852
     )
 import Cardano.Wallet.Address.Discovery.Shared
     ( CredentialType (..)
@@ -418,7 +439,8 @@ import Cardano.Wallet.Address.Keys.BoundedAddressLength
     ( maxLengthAddressFor
     )
 import Cardano.Wallet.Address.Keys.SequentialAny
-    ( mkSeqStateFromRootXPrv
+    ( mkSeqStateForAccount
+    , mkSeqStateFromRootXPrv
     )
 import Cardano.Wallet.Address.Keys.Shared
     ( addCosignerAccXPub
@@ -500,6 +522,12 @@ import Cardano.Wallet.Network
     , NetworkLayer (..)
     , mapChainFollower
     )
+import Cardano.Wallet.Network.Broadcasting
+    ( ChainBroadcaster (..)
+    , WalletBroadcastOps (..)
+    , subscribe
+    , unsubscribe
+    )
 import Cardano.Wallet.Network.RestorationMode
     ( RestorationPoint (..)
     )
@@ -521,15 +549,19 @@ import Cardano.Wallet.Primitive.Ledger.Shelley
     )
 import Cardano.Wallet.Primitive.Model
     ( BlockData (..)
+    , FilteredBlock (FilteredBlock)
     , Wallet
+    , applyBlockEventsToUTxO
     , applyBlocks
     , applyOurTxToUTxO
     , availableUTxO
     , currentTip
+    , discoverFromBlockData
     , firstHeader
     , getState
     , initWallet
     , totalUTxO
+    , utxo
     )
 import Cardano.Wallet.Primitive.NetworkId
     ( HasSNetworkId (..)
@@ -600,6 +632,7 @@ import Cardano.Wallet.Primitive.Types.Block
     )
 import Cardano.Wallet.Primitive.Types.BlockSummary
     ( ChainEvents
+    , toAscBlockEvents
     )
 import Cardano.Wallet.Primitive.Types.Coin
     ( Coin (..)
@@ -660,6 +693,7 @@ import Cardano.Wallet.Primitive.Types.Tx.TxOut
     )
 import Cardano.Wallet.Primitive.Types.UTxO
     ( UTxO (..)
+    , dom
     )
 import Cardano.Wallet.Primitive.Types.UTxOStatistics
     ( UTxOStatistics
@@ -827,6 +861,7 @@ import Data.Maybe
     , fromMaybe
     , isJust
     , isNothing
+    , listToMaybe
     , mapMaybe
     , maybeToList
     )
@@ -889,12 +924,33 @@ import Statistics.Quantile
     ( medianUnbiased
     , quantiles
     )
+import Control.Concurrent
+    ( threadDelay
+    )
+import Control.Concurrent.QSem
+    ( waitQSem
+    , signalQSem
+    )
+import Data.IORef
+    ( newIORef
+    , readIORef
+    , writeIORef
+    )
+import UnliftIO.Async
+    ( waitCatch
+    )
 import UnliftIO.Exception
     ( Exception
+    , SomeException
+    , bracket_
     , catch
     , evaluate
+    , fromException
+    , isSyncException
     , throwIO
+    , try
     )
+import qualified UnliftIO.STM as STM
 import UnliftIO.MVar
     ( modifyMVar_
     , newMVar
@@ -954,6 +1010,7 @@ import qualified Cardano.Wallet.Primitive.Types as W
 import qualified Cardano.Wallet.Primitive.Types.Coin as Coin
 import qualified Cardano.Wallet.Primitive.Types.Range as Range
 import qualified Cardano.Wallet.Primitive.Types.TokenBundle as TokenBundle
+
 import qualified Cardano.Wallet.Primitive.Types.TokenMap as TokenMap
 import qualified Cardano.Wallet.Primitive.Types.Tx.TxOut as TxOut
 import qualified Cardano.Wallet.Primitive.Types.UTxO as UTxO
@@ -1260,6 +1317,7 @@ readWallet ctx = do
                 (Just Pending)
                 Nothing
                 Nothing
+                Nothing
         pure
             ( cp
             , (meta, calculateWalletDelegations currentEpochSlotting)
@@ -1429,6 +1487,203 @@ newtype UncheckErrNoSuchWallet = UncheckErrNoSuchWallet ErrNoSuchWallet
     deriving (Eq, Show)
 instance Exception UncheckErrNoSuchWallet
 
+-- | Build the type-erased broadcaster callbacks for a wallet.
+-- The resulting 'WalletBroadcastOps' captures all wallet-specific state
+-- via closure; the broadcaster sees only opaque 'IO' actions.
+mkWalletBroadcastOps
+    :: ( IsOurs s Address
+       , IsOurs s RewardAccount
+       , AddressBookIso s
+       , KnownAddresses s
+       )
+    => WalletLayer IO s
+    -> WalletBroadcastOps
+mkWalletBroadcastOps ctx =
+    WalletBroadcastOps
+        { wboRollForward = \wblocks tip -> do
+            -- wblocks are already W.Block (conversion done once in master)
+            -- If the first block's parent doesn't match our current tip (fork),
+            -- roll back to the common ancestor before applying.
+            let mParentHash = parentHeaderHash (header (NE.head wblocks))
+            cp0 <- db & \DBLayer{..} -> atomically readCheckpoint
+            unless (Just (headerHash (currentTip cp0)) == mParentHash) $ do
+                checkpoints <- db & \DBLayer{..} -> atomically listCheckpoints
+                let ancestorPt = case mParentHash of
+                        Nothing -> ChainPointAtGenesis
+                        Just ph -> fromMaybe ChainPointAtGenesis
+                            $ listToMaybe
+                            $ filter (\case
+                                ChainPointAtGenesis -> False
+                                ChainPoint _ h     -> h == ph)
+                            checkpoints
+                _ <- rollbackBlocks ctx (toSlot ancestorPt)
+                pure ()
+            let hasTxs = any (not . null . transactions) (NE.toList wblocks)
+            restoreBlocks ctx (contramap MsgWalletFollow tr) (List wblocks) tip
+            if hasTxs then getAddrs else pure []
+        , wboRollback = \readPt -> do
+            actualPt <- rollbackBlocks ctx (toSlot (toWalletChainPoint readPt))
+            pure (fromWalletChainPoint actualPt)
+        , wboCheckpoints = do
+            walletPts <- db & \DBLayer{..} -> atomically listCheckpoints
+            pure (map fromWalletChainPoint walletPts)
+        , wboAddresses = getAddrs
+        , wboUTxOKeys = do
+            cp <- db & \DBLayer{..} -> atomically readCheckpoint
+            pure $ Set.toList (dom (cp ^. #utxo))
+        }
+  where
+    db = ctx ^. dbLayer
+    tr = ctx ^. logger
+    getAddrs = do
+        cp <- db & \DBLayer{..} -> atomically readCheckpoint
+        pure $ map (\(a, _, _) -> a) $ knownAddresses (getState cp)
+
+-- | Sentinel exception thrown internally when the catch-up thread has
+-- processed the master tip block and is ready to activate the consumer.
+data CatchUpDone = CatchUpDone
+    deriving (Show)
+instance Exception CatchUpDone
+
+-- | Subscribe to the broadcaster first (to start buffering live blocks), then
+-- open a dedicated 'chainSync' connection to replay history up to the master's
+-- current tip, and finally activate the consumer so it drains from that tip
+-- onwards.  This eliminates the catch-up→subscribe hand-off race: the consumer
+-- always starts from exactly @masterTip+1@, which is a valid continuation.
+--
+-- On node disconnect or any unexpected error, 'unsubscribe' is called and the
+-- whole process retries after a short delay.
+catchUpWallet
+    :: ( IsOurs s Address
+       , IsOurs s RewardAccount
+       , AddressBookIso s
+       , KnownAddresses s
+       , MaybeLight s
+       )
+    => WalletLayer IO s
+    -> ChainBroadcaster WalletId
+    -> WalletId
+    -> IO ()
+catchUpWallet ctx bc wid = do
+    (mMasterBlockNo, active, fq, consumerThread)
+        <- subscribe bc wid (mkWalletBroadcastOps ctx)
+    case mMasterBlockNo of
+        Nothing -> do
+            -- Master hasn't seen any blocks yet; consumer can start immediately.
+            STM.atomically (STM.writeTVar active True)
+            monitorAndRestartConsumer consumerThread
+        Just masterBlockNo -> do
+            lastAppliedHashRef <- newIORef Nothing
+            let sem = bcCatchUpSemaphore bc
+            result <- bracket_ (waitQSem sem) (signalQSem sem)
+                $ (try (chainSync nw nullTracer $ mapChainFollower
+                fromWalletChainPoint
+                toWalletChainPoint
+                id
+                id
+                ChainFollower
+                    { checkpointPolicy = CP.defaultPolicy
+                    , readChainPoints = db & \DBLayer{..} -> atomically listCheckpoints
+                    , rollForward = \blocks tip -> do
+                        let wblocks = fst . fromCardanoBlock genesisHash
+                                <$> NE.toList blocks
+                            blockNoOf b =
+                                Read.BlockNo
+                                    $ fromIntegral
+                                    $ getQuantity
+                                    $ (header b) ^. #blockHeight
+                            -- Apply only blocks up to masterBlockNo to avoid
+                            -- overlapping with what the consumer will replay.
+                            toApply = takeWhile
+                                (\b -> blockNoOf b <= masterBlockNo)
+                                wblocks
+                            shouldStop = any
+                                (\b -> blockNoOf b >= masterBlockNo)
+                                wblocks
+                        case NE.nonEmpty toApply of
+                            Just ne -> do
+                                restoreBlocks ctx
+                                    (contramap MsgWalletFollow tr)
+                                    (List ne) tip
+                                writeIORef lastAppliedHashRef
+                                    $ Just $ headerHash $ header $ NE.last ne
+                            Nothing -> pure ()
+                        when shouldStop $ throwIO CatchUpDone
+                    , rollBackward = rollbackBlocks ctx . toSlot
+                    }) :: IO (Either SomeException ()))
+            case result of
+                Left e | Just CatchUpDone <- fromException e -> do
+                    activateWithDrain lastAppliedHashRef fq active
+                    monitorAndRestartConsumer consumerThread
+                Left _ -> do
+                    unsubscribe bc wid
+                    threadDelay 1000000
+                    catchUpWallet ctx bc wid
+                Right () -> do
+                    -- chainSync returned normally (e.g. already at masterTip)
+                    activateWithDrain lastAppliedHashRef fq active
+                    monitorAndRestartConsumer consumerThread
+  where
+    db = ctx ^. dbLayer
+    nw = ctx ^. networkLayer
+    tr = ctx ^. logger
+    (_block0, NetworkParameters{genesisParameters = gp}) = ctx ^. genesisData
+    genesisHash = W.getGenesisBlockHash gp
+
+    -- Drain stale forward-queue entries before activating the consumer.
+    -- After catch-up applies blocks up to masterBlockNo, the forward queue may
+    -- contain re-delivered blocks (due to rollback+reforward during catch-up).
+    -- We discard all entries up to (but not including) the first entry whose
+    -- first block is a valid continuation of the last block catch-up applied.
+    activateWithDrain lastAppliedHashRef fq active = do
+        mLastHash <- readIORef lastAppliedHashRef
+        STM.atomically $ do
+            case mLastHash of
+                Nothing -> pure ()
+                Just lastHash -> do
+                    entries <- drainTQueue fq
+                    let fresh = dropWhile
+                            (\(batch, _) ->
+                                parentHeaderHash (header (NE.head batch))
+                                    /= Just lastHash)
+                            entries
+                    mapM_ (STM.writeTQueue fq) fresh
+            STM.writeTVar active True
+
+    drainTQueue q = go []
+      where
+        go acc = STM.tryReadTQueue q >>= \case
+            Nothing -> pure (reverse acc)
+            Just x  -> go (x : acc)
+
+    -- After activating a consumer, wait for it to finish using the thread
+    -- handle returned by 'subscribe'.  This avoids a double-restart race:
+    -- if a concurrent 'subscribe' call replaces our consumer with a new one,
+    -- 'waitCatch consumerThread' returns 'Left AsyncCancelled' (because our
+    -- consumer was cancelled), 'isSyncException' is False, and we exit cleanly
+    -- rather than spawning a second restart.
+    monitorAndRestartConsumer consumerThread = do
+        eResult <- waitCatch consumerThread
+        case eResult of
+            Right () -> pure ()
+            Left e
+                | isSyncException e -> do
+                    unsubscribe bc wid
+                    threadDelay 1000000
+                    catchUpWallet ctx bc wid
+                | otherwise -> pure ()
+
+-- | Roll back a wallet's chain state to genesis so that a fresh catch-up
+-- thread can replay the entire chain from scratch.
+--
+-- The API layer is responsible for cancelling any in-flight catch-up thread,
+-- unsubscribing from the broadcaster, and launching a new catch-up thread via
+-- 'startCatchUpOrSubscribe' after this returns.
+rescanWallet :: WalletLayer IO s -> IO ()
+rescanWallet ctx = do
+    _ <- rollbackBlocks ctx (toSlot ChainPointAtGenesis)
+    pure ()
+
 {- NOTE [CheckedExceptionsAndCallbacks]
 
 Callback functions (such as the fields of 'ChainFollower')
@@ -1536,8 +1791,61 @@ restoreBlocks ctx tr blocks nodeTip =
 
             finalitySlot = nodeTipSlotNo - stabilityWindowShelley slottingParams
 
-            -- Checkpoint deltas
-            wcps = snd . fromWallet <$> cps
+            deltaPruneCheckpoints wallet =
+                pruneCheckpoints
+                    (view $ #currentTip . #blockHeight)
+                    epochStability
+                    (localTip ^. #blockHeight)
+                    (wallet ^. #checkpoints)
+
+        -- Discover UTxO entries for extra accounts from this block batch.
+        -- Account 0 is handled by 'applyBlocks' above; additional accounts
+        -- (index > 0) need their own discovery pass so their received outputs
+        -- are reflected in the global wallet UTxO.
+        (cpsFixed, extraPrologueDeltas) <- do
+            allIdxs <- listSeqAccounts
+            let extraIdxs = filter (/= 0) allIdxs
+            let lastCp = NE.last cps
+            extraResults <- forM extraIdxs $ \ix -> do
+                mExtraSt <- readSeqStateForAccount ix
+                case mExtraSt of
+                    Nothing -> pure (ix, Nothing, mempty :: UTxO, mempty :: UTxO, [])
+                    Just extraSt0 -> do
+                        (extraChainEvents, extraSt1) <-
+                            liftIO $ discoverFromBlockData blocks extraSt0
+                        let extraBlockEvents = toAscBlockEvents extraChainEvents
+                            -- Use cp0 (pre-batch checkpoint from DB) to find this account's
+                            -- UTxO before the current block batch. Using lastCp (post-applyBlocks)
+                            -- is wrong: applyBlocks removes UTxO entries whose TxIns appear as
+                            -- tx inputs, even when those entries belong to a different account.
+                            isAcctAddr addr = isJust . fst $ isOurs addr extraSt0
+                            acctCurrentUTxO = UTxO.filterByAddress isAcctAddr (utxo cp0)
+                            -- Apply each block event, collecting UTxO changes and tx history.
+                            applyOneBlock (curUTxO, accTxs) blockEvent =
+                                let ((FilteredBlock _ fbTxs _, _du), newUTxO) =
+                                        applyBlockEventsToUTxO blockEvent extraSt1 curUTxO
+                                in (newUTxO, accTxs <> fbTxs)
+                            (acctNewUTxO, acctTxs) =
+                                foldl' applyOneBlock (acctCurrentUTxO, []) extraBlockEvents
+                        pure (ix, Just (getPrologue extraSt1), acctCurrentUTxO, acctNewUTxO, acctTxs)
+            let -- Remove each account's old UTxO from the checkpoint, add its new UTxO.
+                -- This correctly handles both receiving new outputs and spending existing ones.
+                allOldExtraUTxOs = mconcat [old | (_, _, old, _, _) <- extraResults]
+                allNewExtraUTxOs = mconcat [new | (_, _, _, new, _) <- extraResults]
+                lastCpFixed = lastCp
+                    { utxo = UTxO.difference (utxo lastCp) allOldExtraUTxOs
+                        <> allNewExtraUTxOs
+                    }
+            -- Store tx history for each extra account.
+            forM_ extraResults $ \(ix, _, _, _, acctTxs) ->
+                unless (null acctTxs) $ putTxHistory ix acctTxs
+            pure
+                ( NE.fromList $ L.init (NE.toList cps) ++ [lastCpFixed]
+                , [InsertExtraPrologue ix p | (ix, Just p, _, _, _) <- extraResults]
+                )
+
+        -- Checkpoint deltas computed from the extra-UTxO-augmented checkpoints.
+        let wcps = snd . fromWallet <$> cpsFixed
             deltaPutCheckpoints =
                 extendCheckpoints
                     getSlot
@@ -1546,29 +1854,11 @@ restoreBlocks ctx tr blocks nodeTip =
                     nodeTipBlockNo
                     wcps
 
-            deltaPruneCheckpoints wallet =
-                pruneCheckpoints
-                    (view $ #currentTip . #blockHeight)
-                    epochStability
-                    (localTip ^. #blockHeight)
-                    (wallet ^. #checkpoints)
-
-            -- NOTE: We have to update the 'Prologue' as well,
-            -- as it can contain addresses for pending transactions,
-            -- which are removed from the 'Prologue' once the
-            -- transactions are accepted onto the chain and discovered.
-            --
-            -- I'm not so sure that the approach here is correct with
-            -- respect to rollbacks, but it is functionally the same
-            -- as the code that came before.
-            deltaPrologue =
-                [ReplacePrologue $ getPrologue $ getState $ NE.last cps]
-
         liftIO $ forM_ txs $ \(Tx{txCBOR = mcbor}, _) ->
             forM_ mcbor $ \cbor -> do
                 traceWith tr $ MsgStoringCBOR cbor
 
-        putTxHistory txs
+        putTxHistory 0 txs
 
         rollForwardTxSubmissions (localTip ^. #slotNo)
             $ fmap (\(tx, meta) -> (meta ^. #slotNo, txId tx)) txs
@@ -1579,10 +1869,21 @@ restoreBlocks ctx tr blocks nodeTip =
             liftIO $ logDelegation delegation
             putDelegationCertificate walletState cert slotNo
 
-        Delta.onDBVar walletState $ Delta.update $ \_wallet ->
-            deltaPrologue
+        -- NOTE: We have to update the 'Prologue' as well,
+        -- as it can contain addresses for pending transactions,
+        -- which are removed from the 'Prologue' once the
+        -- transactions are accepted onto the chain and discovered.
+        --
+        -- We use the current wallet's prologue to preserve any user-set
+        -- fields (e.g. changeAddressMode) that may have been updated
+        -- independently of block application.
+        Delta.onDBVar walletState $ Delta.update $ \wallet ->
+            let newPrologue = getPrologue $ getState $ NE.last cpsFixed
+                mergedPrologue = mergeUserSettings (wallet ^. #prologue) newPrologue
+            in  [ReplacePrologue mergedPrologue]
                 <> [UpdateCheckpoints deltaPutCheckpoints]
                 <> deltaPruneSubmissions
+                <> extraPrologueDeltas
 
         Delta.onDBVar walletState $ Delta.update $ \wallet ->
             [UpdateCheckpoints $ deltaPruneCheckpoints wallet]
@@ -2681,15 +2982,23 @@ buildSignSubmitTransaction
                                     (Just Pending)
                                     Nothing
                                     Nothing
+                                    Nothing
                         ( throwOnErr
                                 <=< (Delta.onDBVar walletState . Delta.updateWithResultAndError)
                             )
                             $ \s -> do
                                 let wallet = WalletState.getLatest s
+                                    walletSt = getState wallet
+                                    -- Filter to account 0's addresses only: the main wallet
+                                    -- UTxO now contains extra-account UTxOs, but coin selection
+                                    -- must not pick inputs whose signing paths are unknown to
+                                    -- walletSt (account 0H's SeqState).
                                     utxo =
-                                        availableUTxO
-                                            (Set.fromList pendingTxs)
-                                            wallet
+                                        UTxO.filterByAddress
+                                            (\addr -> isJust . fst $ isOurs addr walletSt)
+                                            $ availableUTxO
+                                                (Set.fromList pendingTxs)
+                                                wallet
                                 buildTransactionPure @s
                                     wallet
                                     timeTranslation
@@ -2857,13 +3166,19 @@ buildSignSubmitTransaction
                                     (Just Pending)
                                     Nothing
                                     Nothing
+                                    Nothing
                         txWithSlot@(builtTx, slot) <-
                             ( throwOnErr
                                 <=< (Delta.onDBVar walletState . Delta.updateWithResultAndError)
                             )
                                 $ \s -> do
                                     let wallet = WalletState.getLatest s
-                                        utxo = availableUTxO (Set.fromList pendingTxs) wallet
+                                        walletSt = getState wallet
+                                        -- Filter to account 0's addresses only; see V2 path above.
+                                        utxo =
+                                            UTxO.filterByAddress
+                                                (\addr -> isJust . fst $ isOurs addr walletSt)
+                                                $ availableUTxO (Set.fromList pendingTxs) wallet
                                     buildAndSignTransactionPure @k @s
                                         timeTranslation
                                         utxo
@@ -2909,6 +3224,247 @@ buildSignSubmitTransaction
             => Either (ErrBalanceTx era) ErrConstructTx
             -> WalletException
         wrapBalanceConstructError = either ExceptionBalanceTx ExceptionConstructTx
+
+-- | Like 'buildSignSubmitTransaction' but scoped to a specific wallet account.
+-- For account 0H (@minBound@) this delegates to 'buildSignSubmitTransaction'.
+-- For account N >= 1, coin selection is restricted to UTxOs owned by that
+-- account and key derivation paths are taken from the account's sequential
+-- state rather than the default (account 0H) state.
+buildSignSubmitAccountTransaction
+    :: forall s k
+     . ( HardDerivation k
+       , Bounded (Index (AddressIndexDerivationType k) (AddressCredential k))
+       , IsOurs s RewardAccount
+       , AddressBookIso s
+       , IsOurs s Address
+       , WalletFlavor s
+       , CredFromOf s ~ 'CredFromKeyK
+       , k ~ KeyOf s
+       , HasSNetworkId (NetworkOf s)
+       , Excluding '[SharedKey] k
+       )
+    => DBLayer IO s
+    -> NetworkLayer IO Read.ConsensusBlock
+    -> TransactionLayer k 'CredFromKeyK SealedTx
+    -> Passphrase "user"
+    -> WalletId
+    -> Index 'Hardened 'AccountK
+    -> ChangeAddressGen s
+    -> PreSelection
+    -> TransactionCtx
+    -> IO (BuiltTx, UTCTime)
+buildSignSubmitAccountTransaction
+    db@DBLayer{..}
+    netLayer
+    txLayer
+    pwd
+    walletId
+    accountIx
+    changeAddrGen
+    preSelection
+    txCtx
+    | accountIx == minBound =
+        buildSignSubmitTransaction db netLayer txLayer pwd walletId changeAddrGen preSelection txCtx
+    | otherwise = do
+        stdGen <- initStdGen
+        (Write.PParamsInAnyRecentEra _era protocolParams, timeTranslation) <-
+            readNodeTipStateForTxWrite netLayer
+        let ti = timeInterpreter netLayer
+        throwOnErr <=< runExceptT
+            $ withRootKey nullTracer db walletId pwd wrapRootKeyError
+            $ \case
+                RootKeyAccessV2 ekey _mPayload userPwd -> lift $ do
+                    let recentEra' = _era
+                        anyCardanoEra = case recentEra' of
+                            Write.RecentEraConway -> Read.EraValue Read.Conway
+                            Write.RecentEraDijkstra -> Read.EraValue Read.Dijkstra
+                    mAccountSeqSt <-
+                        atomically $ readSeqStateForAccount (softAccountIx accountIx)
+                    accountSeqSt <- case mAccountSeqSt of
+                        Nothing ->
+                            throwIO $ userError
+                                "buildSignSubmitAccountTransaction: account not found"
+                        Just st -> pure st
+                    (unsignedTx, wallet, slot) <- atomically $ do
+                        pendingTxs <-
+                            fmap fromTransactionInfo
+                                <$> readTransactions
+                                    Nothing
+                                    Descending
+                                    Range.everything
+                                    (Just Pending)
+                                    Nothing
+                                    Nothing
+                                    Nothing
+                        ( throwOnErr
+                                <=< (Delta.onDBVar walletState . Delta.updateWithResultAndError)
+                            )
+                            $ \s -> do
+                                let wallet = WalletState.getLatest s
+                                    fullUtxo =
+                                        availableUTxO (Set.fromList pendingTxs) wallet
+                                    accountUtxo =
+                                        UTxO.filterByAddress
+                                            (isJust . fst . (`isOurs` accountSeqSt))
+                                            fullUtxo
+                                    fakeWallet = wallet{getState = accountSeqSt}
+                                buildTransactionPure @s
+                                    fakeWallet
+                                    timeTranslation
+                                    accountUtxo
+                                    changeAddrGen
+                                    protocolParams
+                                    preSelection
+                                    txCtx
+                                    & runExceptT
+                                        . withExceptT wrapBalanceConstructError
+                                    & (`evalRand` stdGen)
+                                    & fmap
+                                        ( \(tx, _newAccountSt) ->
+                                            -- Don't update main wallet prologue for extra
+                                            -- accounts — account state is managed by chain sync.
+                                            ( []
+                                            , (tx, wallet, currentTip wallet ^. #slotNo)
+                                            )
+                                        )
+                    let txBody = unsignedTx ^. bodyTxL
+                        walletUtxo = wallet ^. #utxo
+                        inputPaths =
+                            L.nub
+                                $ mapMaybe
+                                    ( \ledIn ->
+                                        UTxO.lookup
+                                            (toWallet ledIn)
+                                            walletUtxo
+                                            >>= \(TxOut addr _) ->
+                                                fst (isOurs addr accountSeqSt)
+                                    )
+                                    ( Set.toList
+                                        $ unsignedTx ^. bodyTxL . inputsTxBodyL
+                                    )
+                        mStakePath =
+                            case walletFlavor @s of
+                                ShelleyWallet ->
+                                    Just
+                                        $ stakeDerivationPath
+                                        $ Seq.derivationPrefix accountSeqSt
+                                _ -> Nothing
+                        needsStakeKey =
+                            isJust (view #txDelegationAction txCtx)
+                                || isJust (view #txVotingAction txCtx)
+                                || containsSelfWithdrawal (view #txWithdrawal txCtx)
+                        needsMinting = txBody ^. mintTxBodyL /= mempty
+                        mPolicyPath = case walletFlavor @s of
+                            ShelleyWallet | needsMinting -> Just policyDerivationPath
+                            _ -> Nothing
+                        allPaths =
+                            inputPaths
+                                <> case (needsStakeKey, mStakePath) of
+                                    (True, Just p) -> [p]
+                                    _ -> []
+                                <> maybeToList mPolicyPath
+                    witsE <-
+                        withDecryptedExtKeyMaterial ekey userPwd
+                            $ \rootKm -> do
+                                results <-
+                                    forM allPaths $ \path ->
+                                        withDerivedExtKeyMaterial
+                                            DerivationScheme2
+                                            rootKm
+                                            ( map getDerivationIndex
+                                                $ NE.toList path
+                                            )
+                                            $ fmap Right
+                                                . mkShelleyWitnessFromExtKeyMaterial
+                                                    recentEra'
+                                                    txBody
+                                pure $ sequence results
+                    shelleyWits <- case witsE of
+                        Left e ->
+                            error
+                                $ "buildSignSubmitAccountTransaction V2: "
+                                    <> show e
+                        Right wits -> pure wits
+                    let mExternalWit = case view #txWithdrawal txCtx of
+                            WithdrawalExternal _ _ _ extXPrv ->
+                                Just
+                                    $ mkShelleyWitnessLedger
+                                        recentEra'
+                                        txBody
+                                        (extXPrv, mempty)
+                            _ -> Nothing
+                        signedLedgerTx =
+                            unsignedTx
+                                & witsTxL
+                                    . addrTxWitsL
+                                    .~ Set.fromList
+                                        (shelleyWits <> maybeToList mExternalWit)
+                        builtSealedTx = sealWriteTx recentEra' signedLedgerTx
+                        rawTx =
+                            walletTx
+                                $ decodeTx txLayer anyCardanoEra builtSealedTx
+                        utxo' =
+                            applyOurTxToUTxO
+                                (Slot.at $ currentTip wallet ^. #slotNo)
+                                (currentTip wallet ^. #blockHeight)
+                                accountSeqSt
+                                rawTx
+                                walletUtxo
+                        builtTxMeta = case utxo' of
+                            Nothing ->
+                                error
+                                    "buildSignSubmitAccountTransaction V2: \
+                                    \Can't apply constructed transaction."
+                            Just ((_tx, appliedMeta), _, _) ->
+                                appliedMeta
+                                    { status = Pending
+                                    , expiry =
+                                        Just (snd $ txValidityInterval txCtx)
+                                    }
+                        resolveInputs_ =
+                            fmap (\(txIn, _) -> (txIn, UTxO.lookup txIn walletUtxo))
+                        txResolved =
+                            rawTx
+                                { resolvedInputs =
+                                    resolveInputs_ (resolvedInputs rawTx)
+                                , resolvedCollateralInputs =
+                                    resolveInputs_
+                                        (resolvedCollateralInputs rawTx)
+                                }
+                    let builtTx =
+                            BuiltTx
+                                { builtTx = txResolved
+                                , builtTxMeta
+                                , builtSealedTx
+                                }
+                    atomically
+                        $ Delta.onDBVar walletState
+                            . WalletState.updateSubmissions
+                            . Delta.update
+                        $ \_ -> Submissions.addTxSubmission builtTx slot
+                    postSealedTx netLayer builtSealedTx
+                        & throwWrappedErr wrapNetworkError
+                        & liftIO
+                    slotToUTCTime slot
+                        & interpretQuery
+                            (neverFails "slot is ahead of the node tip" ti)
+                        & fmap (builtTx,)
+                        & liftIO
+                RootKeyAccessV1{} ->
+                    liftIO
+                        $ throwIO
+                        $ userError
+                            "buildSignSubmitAccountTransaction: \
+                            \V1 keys not supported for extra accounts"
+  where
+    wrapRootKeyError = ExceptionWitnessTx . ErrWitnessTxWithRootKey
+    wrapNetworkError = ExceptionSubmitTx . ErrSubmitTxNetwork
+
+    wrapBalanceConstructError
+        :: Write.IsRecentEra era
+        => Either (ErrBalanceTx era) ErrConstructTx
+        -> WalletException
+    wrapBalanceConstructError = either ExceptionBalanceTx ExceptionConstructTx
 
 buildAndSignTransactionPure
     :: forall k s era
@@ -3069,6 +3625,7 @@ buildTransaction
                         (Just Pending)
                         Nothing
                         Nothing
+                        Nothing
 
             let utxo = availableUTxO @s pendingTxs wallet
 
@@ -3208,8 +3765,12 @@ buildAndSignTransaction
     -> Passphrase "user"
     -> TransactionCtx
     -> SelectionOf TxOut
+    -> (Address -> Maybe (NonEmpty DerivationIndex))
+    -- ^ Extra path lookup for inputs not owned by the checkpoint state
+    -- (e.g. inputs from a non-default account). Pass @const Nothing@ when
+    -- all inputs belong to account 0H.
     -> ExceptT ErrSignPayment IO (Tx, TxMeta, UTCTime, SealedTx)
-buildAndSignTransaction ctx wid mkRwdAcct pwd txCtx sel =
+buildAndSignTransaction ctx wid mkRwdAcct pwd txCtx sel extraPathLookup =
     db & \DBLayer{..} ->
         withRootKey
             (contramap MsgWallet (logger_ ctx))
@@ -3273,7 +3834,11 @@ buildAndSignTransaction ctx wid mkRwdAcct pwd txCtx sel =
                                             (toWallet ledIn)
                                             walletUtxo
                                             >>= \(TxOut addr _) ->
-                                                fst (isOurs addr walletSt)
+                                                let fromCheckpoint =
+                                                        fst (isOurs addr walletSt)
+                                                in  case fromCheckpoint of
+                                                        Just _ -> fromCheckpoint
+                                                        Nothing -> extraPathLookup addr
                                     )
                                     ( Set.toList
                                         $ unsignedTx ^. bodyTxL . inputsTxBodyL
@@ -3807,7 +4372,7 @@ listTransactions ctx mMinWithdrawal mStart mEnd order mLimit mAddress =
                     (pure [])
                     ( \r ->
                         lift
-                            $ readTransactions mMinWithdrawal order r Nothing mLimit mAddress
+                            $ readTransactions mMinWithdrawal order r Nothing mLimit mAddress (Just 0)
                     )
   where
     ti :: TimeInterpreter (ExceptT PastHorizonException IO)
@@ -3818,6 +4383,55 @@ listTransactions ctx mMinWithdrawal mStart mEnd order mLimit mAddress =
     -- Transforms the user-specified time range into a slot range. If the
     -- user-specified range terminates before the start of the blockchain,
     -- returns 'Nothing'.
+    getSlotRange
+        :: ExceptT ErrListTransactions IO (Maybe (Range SlotNo))
+    getSlotRange = case (mStart, mEnd) of
+        (Just start, Just end) | start > end -> do
+            let err = ErrStartTimeLaterThanEndTime start end
+            throwE (ErrListTransactionsStartTimeLaterThanEndTime err)
+        _ -> do
+            withExceptT ErrListTransactionsPastHorizonException
+                $ interpretQuery ti
+                $ slotRangeFromTimeRange
+                $ Range mStart mEnd
+
+-- | List transactions for a specific account index within a wallet.
+listTransactionsForAccount
+    :: WalletLayer IO s
+    -> Word32
+    -- ^ Account index (e.g. 0 for account 0H, 1 for account 1H).
+    -> Maybe Coin
+    -> Maybe UTCTime
+    -> Maybe UTCTime
+    -> SortOrder
+    -> Maybe Natural
+    -> Maybe Address
+    -> ExceptT ErrListTransactions IO [TransactionInfo]
+listTransactionsForAccount ctx acctIx mMinWithdrawal mStart mEnd order mLimit mAddress =
+    db & \DBLayer{..} -> do
+        when (Just True == ((< (Coin 1)) <$> mMinWithdrawal))
+            $ throwE ErrListTransactionsMinWithdrawalWrong
+        mapExceptT atomically $ do
+            mapExceptT liftIO getSlotRange
+                >>= maybe
+                    (pure [])
+                    ( \r ->
+                        lift
+                            $ readTransactions
+                                mMinWithdrawal
+                                order
+                                r
+                                Nothing
+                                mLimit
+                                mAddress
+                                (Just acctIx)
+                    )
+  where
+    ti :: TimeInterpreter (ExceptT PastHorizonException IO)
+    ti = timeInterpreter (ctx ^. networkLayer)
+
+    db = ctx ^. dbLayer
+
     getSlotRange
         :: ExceptT ErrListTransactions IO (Maybe (Range SlotNo))
     getSlotRange = case (mStart, mEnd) of
@@ -3847,6 +4461,7 @@ listAssets ctx =
                         Ascending
                         Range.everything
                         allTxStatuses
+                        Nothing
                         Nothing
                         Nothing
         let txAssets :: TransactionInfo -> Set AssetId
@@ -4684,6 +5299,33 @@ setChangeAddressMode ctx mode =
             seqState' = seqState & #changeAddressMode .~ mode
         in  [ReplacePrologue $ SeqPrologue seqState']
 
+-- | Update 'changeAddressMode' for a specific account.
+-- For account 0H (minBound) this delegates to 'setChangeAddressMode';
+-- for extra accounts it reads the stored prologue, patches the mode field,
+-- and writes it back via 'InsertExtraPrologue'.
+setChangeAddressModeForAccount
+    :: forall s n k
+     . ( s ~ SeqState n k
+       , k ~ ShelleyKey
+       )
+    => WalletLayer IO s
+    -> Index 'Hardened 'AccountK
+    -> ChangeAddressMode
+    -> IO ()
+setChangeAddressModeForAccount ctx accountIx mode
+    | accountIx == minBound = setChangeAddressMode ctx mode
+    | otherwise =
+        db & \DBLayer{..} -> do
+            mSt <- atomically $ readSeqStateForAccount accountIxW
+            case mSt of
+                Nothing -> pure ()
+                Just st ->
+                    onWalletState ctx $ update $ \_ ->
+                        [InsertExtraPrologue accountIxW (SeqPrologue (st & #changeAddressMode .~ mode))]
+  where
+    db = ctx ^. dbLayer
+    accountIxW = softAccountIx accountIx
+
 setChangeAddressModeShared
     :: forall s n
      . s ~ SharedState n SharedKey
@@ -4695,6 +5337,296 @@ setChangeAddressModeShared ctx mode =
         let (SharedPrologue sharedState) = WS.prologue s
             sharedState' = sharedState & #changeAddressMode .~ mode
         in  [ReplacePrologue $ SharedPrologue sharedState']
+
+-- | Summary of a single account returned by 'listWalletAccounts'.
+-- Contains the raw account index and the current address discovery state.
+data AccountSummary s = AccountSummary
+    { acctSummaryIndex :: Index 'Hardened 'AccountK
+    , acctSummaryState :: s
+    }
+
+-- | Error returned when 'addWalletAccount' fails.
+data ErrAddAccount
+    = ErrAddAccountDuplicate
+    -- ^ An account with this index already exists.
+    | ErrAddAccountWithRootKey ErrWithRootKey
+    -- ^ Could not decrypt the root key.
+    | ErrAddAccountV2NotSupported
+    -- ^ V2 key format is not yet supported for multi-account derivation.
+    deriving (Eq, Show)
+
+-- | Error returned when 'deleteWalletAccount' fails.
+data ErrDeleteAccount
+    = ErrDeleteAccountIsDefault
+    -- ^ Account 0H cannot be deleted.
+    | ErrDeleteAccountNotFound
+    -- ^ No such account index in this wallet.
+    deriving (Eq, Show)
+
+-- | Add a new hardened account to an existing Shelley wallet.
+-- Derives a fresh 'SeqState' from the wallet's root key at @accountIx@
+-- and persists it independently of account 0H.
+-- Returns 'ErrAddAccountDuplicate' if the index already exists.
+addWalletAccount
+    :: forall s n k
+     . ( s ~ SeqState n k
+       , SupportsDiscovery n k
+       , Excluding '[ByronKey, SharedKey] k
+       , WalletFlavor s
+       )
+    => WalletLayer IO s
+    -> Index 'Hardened 'AccountK
+    -> Passphrase "user"
+    -> ExceptT ErrAddAccount IO ()
+addWalletAccount ctx accountIx pwd =
+    db & \DBLayer{..} -> do
+        -- Account 0H is the default account, always stored separately; refuse it here.
+        when (accountIx == minBound) $ throwE ErrAddAccountDuplicate
+        withRootKey tr db walletId_ pwd ErrAddAccountWithRootKey $ \case
+            RootKeyAccessV1 rootXPrv scheme ->
+                let encPwd = preparePassphrase scheme pwd
+                    seqState =
+                        mkSeqStateForAccount
+                            kF
+                            accountIx
+                            (RootCredentials rootXPrv encPwd)
+                            defaultAddressPoolGap
+                            IncreasingChangeAddresses
+                -- Duplicate check and write are atomic to prevent restoreBlocks
+                -- from seeing stale listSeqAccounts between the two operations.
+                in  ExceptT $ atomically $ do
+                        existing <- listSeqAccounts
+                        if accountIxW `elem` existing
+                            then pure (Left ErrAddAccountDuplicate)
+                            else Right () <$ onDBVar walletState
+                                    (update $ \_ -> [InsertExtraPrologue accountIxW (SeqPrologue seqState)])
+            RootKeyAccessV2 ekey _ userPwd -> do
+                let deriveKey path =
+                        foldM
+                            ( \ek pathIx ->
+                                encryptedDerivePrivate DerivationScheme2 ek userPwd pathIx
+                                    >>= either
+                                        (error . ("addWalletAccount V2: " <>) . show)
+                                        pure
+                            )
+                            ekey
+                            path
+                    toRawXPub derived =
+                        let pubBytes = publicKeyByteString (encryptedPublic derived)
+                            ccBytes = chainCodeByteString (encryptedChainCode derived)
+                        in  case xpub (pubBytes <> ccBytes) of
+                                Left e -> error $ "addWalletAccount V2 xpub: " <> e
+                                Right xp -> xp
+                    accountPath =
+                        [ getIndex purposeCIP1852
+                        , getIndex coinTypeAda
+                        , accountIxW
+                        ]
+                    policyPath =
+                        [ getIndex purposeCIP1855
+                        , getIndex coinTypeAda
+                        , getIndex (minBound :: Index 'Hardened 'PolicyK)
+                        ]
+                accountXPub <- lift $ liftRawKey kF . toRawXPub <$> deriveKey accountPath
+                policyXPub <- lift $ liftRawKey kF . toRawXPub <$> deriveKey policyPath
+                let seqState :: SeqState n k
+                    seqState =
+                        mkSeqStateFromAccountXPub @n
+                            accountXPub
+                            (Just policyXPub)
+                            purposeCIP1852
+                            defaultAddressPoolGap
+                            IncreasingChangeAddresses
+                        & #derivationPrefix .~ DerivationPrefix (purposeCIP1852, coinTypeAda, accountIx)
+                -- Duplicate check and write are atomic to prevent restoreBlocks
+                -- from seeing stale listSeqAccounts between the two operations.
+                ExceptT $ atomically $ do
+                    existing <- listSeqAccounts
+                    if accountIxW `elem` existing
+                        then pure (Left ErrAddAccountDuplicate)
+                        else Right () <$ onDBVar walletState
+                                (update $ \_ -> [InsertExtraPrologue accountIxW (SeqPrologue seqState)])
+  where
+    db = ctx ^. dbLayer
+    tr = contramap MsgWallet (logger_ ctx)
+    kF = keyFlavorFromState @s
+    accountIxW = softAccountIx accountIx
+
+-- | Add a new hardened account to an existing Shelley wallet using an
+-- account-level public key. Intended for hardware wallets where the root key
+-- is not available; the caller exports m/1852'/1815'/N' from the device.
+-- Returns 'ErrAddAccountDuplicate' if the index already exists.
+addWalletAccountXPub
+    :: forall s n k
+     . ( s ~ SeqState n k
+       , SupportsDiscovery n k
+       , Excluding '[ByronKey, SharedKey] k
+       , WalletFlavor s
+       )
+    => WalletLayer IO s
+    -> Index 'Hardened 'AccountK
+    -> XPub
+    -> ExceptT ErrAddAccount IO ()
+addWalletAccountXPub ctx accountIx rawXPub =
+    db & \DBLayer{..} -> do
+        when (accountIx == minBound) $ throwE ErrAddAccountDuplicate
+        let accountXPub = liftRawKey kF rawXPub
+            seqState :: SeqState n k
+            seqState =
+                mkSeqStateFromAccountXPub @n
+                    accountXPub
+                    Nothing
+                    purposeCIP1852
+                    defaultAddressPoolGap
+                    IncreasingChangeAddresses
+                & #derivationPrefix .~ DerivationPrefix (purposeCIP1852, coinTypeAda, accountIx)
+        ExceptT $ atomically $ do
+            existing <- listSeqAccounts
+            if accountIxW `elem` existing
+                then pure (Left ErrAddAccountDuplicate)
+                else Right () <$ onDBVar walletState
+                        (update $ \_ -> [InsertExtraPrologue accountIxW (SeqPrologue seqState)])
+  where
+    db = ctx ^. dbLayer
+    kF = keyFlavorFromState @s
+    accountIxW = softAccountIx accountIx
+
+-- | List all account indices registered for a Shelley wallet.
+listWalletAccounts
+    :: forall s
+     . WalletLayer IO s
+    -> IO [Word32]
+listWalletAccounts ctx =
+    db & \DBLayer{..} -> atomically listSeqAccounts
+  where
+    db = ctx ^. dbLayer
+
+-- | Convert a hardened account index to the DB account index by stripping the
+-- hardened bit. The DB stores account 0H as 0, 1H as 1, 2H as 2, etc.
+softAccountIx :: Index 'Hardened 'AccountK -> Word32
+softAccountIx ix = getIndex ix - getIndex (minBound :: Index 'Hardened 'AccountK)
+
+-- | Delete the account at @accountIx@ from a Shelley wallet.
+-- Returns 'ErrDeleteAccountIsDefault' when @accountIx == minBound@ (0H).
+-- Returns 'ErrDeleteAccountNotFound' if the index has not been registered.
+deleteWalletAccount
+    :: WalletLayer IO s
+    -> Index 'Hardened 'AccountK
+    -> ExceptT ErrDeleteAccount IO ()
+deleteWalletAccount ctx accountIx = do
+    when (accountIx == minBound) $ throwE ErrDeleteAccountIsDefault
+    db & \DBLayer{..} -> do
+        existing <- lift $ atomically listSeqAccounts
+        unless (accountIxW `elem` existing)
+            $ throwE ErrDeleteAccountNotFound
+        lift
+            $ onWalletState ctx
+            $ update
+            $ \_ -> [DeleteExtraPrologue accountIxW]
+  where
+    db = ctx ^. dbLayer
+    accountIxW = softAccountIx accountIx
+
+-- | Error returned when looking up a specific wallet account fails.
+data ErrGetAccount = ErrGetAccountNotFound
+    deriving (Eq, Show)
+
+-- | Read the available 'UTxO' scoped to a single account.
+-- For account 0H (minBound) the main wallet checkpoint is used directly.
+-- For other accounts the per-account 'SeqState' is loaded from the DB.
+readAccountUTxO
+    :: forall s n k
+     . ( s ~ SeqState n k
+       , IsOurs s Address
+       )
+    => WalletLayer IO s
+    -> Index 'Hardened 'AccountK
+    -> IO UTxO
+readAccountUTxO ctx accountIx
+    | accountIx == minBound = defaultAccountUTxO
+    | otherwise = do
+        mSt <- db & \DBLayer{..} ->
+            atomically $ readSeqStateForAccount (softAccountIx accountIx)
+        case mSt of
+            Nothing -> pure UTxO.empty
+            Just seqSt -> do
+                (utxo, _, _) <- readWalletUTxO ctx
+                pure $ UTxO.filterByAddress (isJust . fst . (`isOurs` seqSt)) utxo
+  where
+    db = ctx ^. dbLayer
+    defaultAccountUTxO = do
+        (utxo, cp, _pending) <- readWalletUTxO ctx
+        let seqSt = getState cp
+        pure $ UTxO.filterByAddress (isJust . fst . (`isOurs` seqSt)) utxo
+
+-- | Compute UTxO distribution statistics scoped to a single account.
+listAccountUtxoStatistics
+    :: forall s n k
+     . ( s ~ SeqState n k
+       , IsOurs s Address
+       )
+    => WalletLayer IO s
+    -> Index 'Hardened 'AccountK
+    -> IO UTxOStatistics
+listAccountUtxoStatistics ctx accountIx = do
+    utxo <- readAccountUTxO ctx accountIx
+    pure $ UTxOStatistics.compute utxo
+
+-- | List all known addresses for a specific account, sorted by discovery order.
+-- Account 0H uses the current checkpoint; extra accounts load their SeqState from the DB.
+listAccountAddresses
+    :: forall s n k
+     . ( s ~ SeqState n k
+       , CompareDiscovery s
+       , KnownAddresses s
+       )
+    => WalletLayer IO s
+    -> (s -> Address -> Maybe Address)
+    -> Index 'Hardened 'AccountK
+    -> IO [(Address, AddressState, NonEmpty DerivationIndex)]
+listAccountAddresses ctx normalize accountIx
+    | accountIx == minBound = do
+        cp <- db & \DBLayer{..} -> atomically readCheckpoint
+        let s = getState cp
+        return
+            $ L.sortBy (\(a, _, _) (b, _, _) -> compareDiscovery s a b)
+            $ mapMaybe (\(addr, st, path) -> (,st,path) <$> normalize s addr)
+            $ knownAddresses s
+    | otherwise = do
+        mSt <- db & \DBLayer{..} ->
+            atomically $ readSeqStateForAccount (softAccountIx accountIx)
+        case mSt of
+            Nothing -> return []
+            Just seqSt ->
+                return
+                    $ L.sortBy (\(a, _, _) (b, _, _) -> compareDiscovery seqSt a b)
+                    $ mapMaybe (\(addr, st, path) -> (,st,path) <$> normalize seqSt addr)
+                    $ knownAddresses seqSt
+  where
+    db = ctx ^. dbLayer
+
+-- | Create a 'MigrationPlan' scoped to a single account's UTxO.
+-- Callers use 'migrationPlanToSelectionWithdrawals' and
+-- 'buildAndSignTransaction' (with the account's 'isOurs' as
+-- @extraPathLookup@) to build and submit the consolidation transaction.
+createAccountMigrationPlan
+    :: forall s n k
+     . ( s ~ SeqState n k
+       , IsOurs s Address
+       )
+    => WalletLayer IO s
+    -> Index 'Hardened 'AccountK
+    -> IO MigrationPlan
+createAccountMigrationPlan ctx accountIx = do
+    let nl = ctx ^. networkLayer
+        tl = transactionLayer_ ctx
+    acctUtxo <- readAccountUTxO ctx accountIx
+    (Write.PParamsInAnyRecentEra _era pp, _) <-
+        readNodeTipStateForTxWrite nl
+    let constraints = txConstraints pp (transactionWitnessTag tl)
+    pure
+        $ Migration.createPlan constraints acctUtxo
+        $ Migration.RewardWithdrawal (Coin 0)
 
 -- | Retrieve any public account key of a wallet.
 getAccountPublicKeyAtIndex

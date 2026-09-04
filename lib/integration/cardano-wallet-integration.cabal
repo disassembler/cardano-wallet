@@ -193,6 +193,7 @@ library scenarios
     Test.Integration.Scenario.API.Shared.Addresses
     Test.Integration.Scenario.API.Shared.Transactions
     Test.Integration.Scenario.API.Shared.Wallets
+    Test.Integration.Scenario.API.Shelley.Accounts
     Test.Integration.Scenario.API.Shelley.Addresses
     Test.Integration.Scenario.API.Shelley.CoinSelections
     Test.Integration.Scenario.API.Shelley.HWWallets
@@ -203,6 +204,7 @@ library scenarios
     Test.Integration.Scenario.API.Shelley.StakePools
     Test.Integration.Scenario.API.Shelley.Transactions
     Test.Integration.Scenario.API.Shelley.TransactionsNew
+    Test.Integration.Scenario.API.Shelley.ChainSync
     Test.Integration.Scenario.API.Shelley.Wallets
     Test.Integration.Scenario.API.Voting
     Test.Integration.Scenario.CLI.Byron.Addresses

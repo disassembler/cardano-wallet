@@ -102,8 +102,8 @@ withBootDBLayer timeInterpreter wid params k = do
                                            Tx History
               -----------------------------------------------------------------------}
 
-              putTxHistory = noErrorAlterDB db . mPutTxHistory
-            , readTransactions = \minWithdrawal order range mstatus _mlimit maddress ->
+              putTxHistory = \_acctIx -> noErrorAlterDB db . mPutTxHistory
+            , readTransactions = \minWithdrawal order range mstatus _mlimit maddress _mAcctIx ->
                 fmap (fromMaybe [])
                     $ readDBMaybe db
                     $ mReadTxHistory
@@ -148,6 +148,10 @@ withBootDBLayer timeInterpreter wid params k = do
 
               getSchemaVersion =
                 error "getSchemaVersion not tested in State Machine tests"
+            , listSeqAccounts =
+                error "listSeqAccounts not tested in State Machine tests"
+            , readSeqStateForAccount =
+                error "readSeqStateForAccount not tested in State Machine tests"
             , atomically = \action -> withMVar lock $ \() -> action
             }
 

@@ -56,6 +56,7 @@ module Cardano.Wallet.Primitive.Model
     , unsafeInitWallet
 
       -- ** Exported for testing
+    , applyBlockEventsToUTxO
     , spendTx
     , utxoFromTx
     , utxoFromTxOutputs
